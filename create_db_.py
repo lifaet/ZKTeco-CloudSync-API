@@ -93,6 +93,32 @@ def create_database_and_table():
                 
                 # Switch to the database
                 cursor.execute(f"USE {DB_NAME};")
+
+                # Create the users table used by the dashboard
+                logger.info("🔄 Creating table users if it doesn't exist...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INT NOT NULL PRIMARY KEY,
+                        name VARCHAR(255) NOT NULL,
+                        title VARCHAR(255) DEFAULT NULL,
+                        department VARCHAR(255) DEFAULT NULL,
+                        created_at TIMESTAMP NULL,
+                        updated_at TIMESTAMP NULL,
+                        active TINYINT(1) NOT NULL DEFAULT 1,
+                        view_order INT DEFAULT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                """)
+
+                # Create the settings table used by attendance filters
+                logger.info("🔄 Creating table settings if it doesn't exist...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS settings (
+                        `key` VARCHAR(255) NOT NULL PRIMARY KEY,
+                        `value` TEXT DEFAULT NULL,
+                        created_at TIMESTAMP NULL,
+                        updated_at TIMESTAMP NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                """)
                 
                 # Create table with proper indexes and constraints
                 logger.info(f"🔄 Creating table {TABLE_NAME} if it doesn't exist...")

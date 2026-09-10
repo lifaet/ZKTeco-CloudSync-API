@@ -1390,7 +1390,7 @@ $(document).ready(function(){
                 html += '<tr><td colspan="5" style="' + td + 'text-align:center; font-size:16pt; font-weight:bold;">'
                      + 'Daily Attendance Record' + BR + 'Date: ' + fmtDMY(date) + '</td></tr>';
                 // Header row
-                const headers = ['AC-No.', 'Name', 'Check out (' + fmtDMY(lastWorkDay) + ')', 'Check in (' + fmtDMY(date) + ')', 'Remarks'];
+                const headers = ['ID No.', 'Name', 'Check out (' + fmtDMY(lastWorkDay) + ')', 'Check in (' + fmtDMY(date) + ')', 'Remarks'];
                 html += '<tr>' + headers.map(function(h) {
                     return '<td style="' + td + ' font-weight:bold; text-align:center;">' + h + '</td>';
                 }).join('') + '</tr>';
