@@ -7,6 +7,7 @@ use App\Models\Attendance;
 use App\Models\User;
 use App\Models\Setting;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class AttendanceController extends Controller
 {
@@ -161,66 +162,57 @@ class AttendanceController extends Controller
             ]);
         }
 
-        // For other types (monthly, user), use the original logic
-        // Helper to group a collection of Attendance models by user+date
-        $groupCollection = function($collection) {
-            return $collection->groupBy(function($item) {
-                return $item->user_id . '_' . Carbon::parse($item->timestamp)->format('Y-m-d');
-            })->map(function($records) {
-                $first = $records->sortBy('timestamp')->first();
-                $last  = $records->sortByDesc('timestamp')->first();
+        // Monthly / User: SQL-grouped (fixes full-table load + MySQL portability)
+        $perPage = $length > 0 ? $length : 10;
 
-                $inTime  = Carbon::parse($first->timestamp)->format('H:i:s');
-                $outTime = ($first->id !== $last->id) ? Carbon::parse($last->timestamp)->format('H:i:s') : '';
-                $workTime = '';
-
-                if ($outTime) {
-                    $diff = Carbon::parse($last->timestamp)->diff(Carbon::parse($first->timestamp));
-                    $workTime = sprintf('%02d:%02d:%02d', $diff->h, $diff->i, $diff->s ?? 0);
-                }
-
-                return [
-                    'user_id'     => $first->user_id,
-                    'date'        => Carbon::parse($first->timestamp)->format('Y-m-d'),
-                    'first_punch' => $inTime,
-                    'last_punch'  => $outTime,
-                    'work_time'   => $workTime,
-                    'punch'       => $last->punch ?? '',
-                    'status'      => $last->status ?? '',
-                    'is_absent'   => false,
-                ];
-            })->values();
-        };
-
-        // Get all records for computing totals (grouped total)
-        $allRecords = Attendance::orderBy('timestamp', 'desc')->get();
-        $allGrouped = $groupCollection($allRecords);
-        $recordsTotal = $allGrouped->count();
-
-        // Build filtered query
-        $filteredQuery = Attendance::query();
+        $base = DB::table('attendances')
+            ->selectRaw("user_id, DATE(timestamp) as date, MIN(timestamp) as first_punch, CASE WHEN COUNT(*) > 1 THEN MAX(timestamp) ELSE NULL END as last_punch, CASE WHEN COUNT(*) > 1 THEN TIMESTAMPDIFF(SECOND, MIN(timestamp), MAX(timestamp)) ELSE NULL END as work_seconds, MAX(punch) as punch, MAX(status) as status")
+            ->groupBy('user_id', DB::raw('DATE(timestamp)'));
 
         if ($type === 'monthly' && $month) {
-            // month expected in YYYY-MM
-            $filteredQuery->whereRaw("DATE_FORMAT(timestamp, '%Y-%m') = ?", [$month]);
+            $base->whereRaw("DATE_FORMAT(timestamp, '%Y-%m') = ?", [$month]);
         }
         if ($type === 'user' && $user) {
-            $filteredQuery->where('user_id', $user);
+            $base->where('user_id', $user);
         }
 
+        $recordsTotal = DB::table(DB::raw("({$base->toSql()}) as t_total"))
+            ->mergeBindings($base)->count();
+
+        $filtered = clone $base;
         if ($search = $request->input('search.value')) {
-            $filteredQuery->where(function($q) use ($search) {
-                $q->where('user_id', 'like', "%$search%")
-                  ->orWhere('timestamp', 'like', "%$search%");
-            });
+            $filtered->having('user_id', 'like', "%{$search}%");
         }
 
-        $filteredRecords = $filteredQuery->orderBy('timestamp', 'desc')->get();
-        $groupedFiltered = $groupCollection($filteredRecords);
-        $recordsFiltered = $groupedFiltered->count();
+        $recordsFiltered = DB::table(DB::raw("({$filtered->toSql()}) as t_filt"))
+            ->mergeBindings($filtered)->count();
 
-        // paginate grouped results
-        $paged = $groupedFiltered->slice($start, $length)->values();
+        $paged = DB::table(DB::raw("({$filtered->toSql()}) as t"))
+            ->mergeBindings($filtered)
+            ->orderBy('date', 'desc')->orderBy('user_id')
+            ->offset($start)->limit($perPage)
+            ->get()
+            ->map(function($row){
+                $first = $row->first_punch ? date('H:i:s', strtotime($row->first_punch)) : '';
+                $last  = $row->last_punch ? date('H:i:s', strtotime($row->last_punch)) : '';
+                $work = '';
+                if ($row->work_seconds !== null) {
+                    $h = intdiv($row->work_seconds, 3600);
+                    $m = intdiv($row->work_seconds % 3600, 60);
+                    $s = $row->work_seconds % 60;
+                    $work = sprintf('%02d:%02d:%02d',$h,$m,$s);
+                }
+                return [
+                    'user_id' => $row->user_id,
+                    'date' => $row->date,
+                    'first_punch' => $first,
+                    'last_punch' => $last,
+                    'work_time' => $work,
+                    'punch' => $row->punch ?? '',
+                    'status' => $row->status ?? '',
+                    'is_absent' => false,
+                ];
+            });
 
         return response()->json([
             'draw' => intval($request->draw),
@@ -266,8 +258,16 @@ class AttendanceController extends Controller
 
     public function update(Request $request)
     {
-        $userId = $request->input('user_id');
-        $date = $request->input('date');
+        $data = $request->validate([
+            'user_id' => 'required|string',
+            'date' => 'required|date_format:Y-m-d',
+            'first_punch' => 'required|date_format:H:i:s',
+            'last_punch' => 'nullable|date_format:H:i:s',
+            'punch' => 'nullable|string|max:50',
+            'status' => 'nullable|string|max:50',
+        ]);
+        $userId = $data['user_id'];
+        $date = $data['date'];
         
         // Find the attendance records for this user and date
         $records = Attendance::where('user_id', $userId)
@@ -284,20 +284,20 @@ class AttendanceController extends Controller
         $lastRecord = $records->last();
 
         // Parse the time inputs
-        $firstTime = Carbon::parse($date . ' ' . $request->input('first_punch'));
+        $firstTime = Carbon::parse($date . ' ' . $data['first_punch']);
         
         // Update first punch
         $firstRecord->timestamp = $firstTime;
-        $firstRecord->punch = $request->input('punch');
-        $firstRecord->status = $request->input('status');
+        $firstRecord->punch = $data['punch'] ?? $firstRecord->punch;
+        $firstRecord->status = $data['status'] ?? $firstRecord->status;
         $firstRecord->save();
 
         // If there's a last punch and it's different from first punch
-        if ($request->input('last_punch') && $firstRecord->id !== $lastRecord->id) {
-            $lastTime = Carbon::parse($date . ' ' . $request->input('last_punch'));
+        if (!empty($data['last_punch']) && $firstRecord->id !== $lastRecord->id) {
+            $lastTime = Carbon::parse($date . ' ' . $data['last_punch']);
             $lastRecord->timestamp = $lastTime;
-            $lastRecord->punch = $request->input('punch');
-            $lastRecord->status = $request->input('status');
+            $lastRecord->punch = $data['punch'] ?? $lastRecord->punch;
+            $lastRecord->status = $data['status'] ?? $lastRecord->status;
             $lastRecord->save();
         }
 
@@ -306,8 +306,12 @@ class AttendanceController extends Controller
 
     public function delete(Request $request)
     {
-        $userId = $request->input('user_id');
-        $date = $request->input('date');
+        $data = $request->validate([
+            'user_id' => 'required|string',
+            'date' => 'required|date_format:Y-m-d',
+        ]);
+        $userId = $data['user_id'];
+        $date = $data['date'];
 
         // Delete all attendance records for this user and date
         $deleted = Attendance::where('user_id', $userId)
@@ -326,15 +330,18 @@ class AttendanceController extends Controller
      */
     public function add(Request $request)
     {
-        $userId = $request->input('user_id');
-        $date = $request->input('date');
-        $firstPunch = $request->input('first_punch');
-        $lastPunch = $request->input('last_punch');
-        $status = $request->input('status', null);
-
-        if (! $userId || ! $date || ! $firstPunch) {
-            return response()->json(['message' => 'user_id, date and first_punch are required'], 400);
-        }
+        $data = $request->validate([
+            'user_id' => 'required|string',
+            'date' => 'required|date_format:Y-m-d',
+            'first_punch' => 'required|date_format:H:i:s',
+            'last_punch' => 'nullable|date_format:H:i:s',
+            'status' => 'nullable|string|max:50',
+        ]);
+        $userId = $data['user_id'];
+        $date = $data['date'];
+        $firstPunch = $data['first_punch'];
+        $lastPunch = $data['last_punch'] ?? null;
+        $status = $data['status'] ?? null;
 
         try {
             $firstTs = Carbon::parse($date . ' ' . $firstPunch)->format('Y-m-d H:i:s');

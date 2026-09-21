@@ -2,3 +2,6 @@ logs/
 __pycache__/
 restore_from_log.py
 config.py
+.venv/
+*.pyc
+requirements.lock

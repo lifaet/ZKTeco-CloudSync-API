@@ -4,10 +4,11 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 use Illuminate\Support\Facades\Redirect;
 
-// PhpSpreadsheet imports removed — exports run client-side; keep controller focused on DB/views
+// Dashboard auth now via middleware + config/dashboard.php — exports run client-side; keep controller focused on DB/views
 
 
 class DashboardController extends Controller
@@ -28,17 +29,23 @@ class DashboardController extends Controller
         return view('login');
     }
 
-    // Process login (very simple password check via env var)
+    // Process login — uses bcrypt hash if DASHBOARD_PASSWORD_HASH is set, fallback to plain for dev
     public function login(Request $request)
     {
         $password = $request->input('password');
-        $expected = env('DASHBOARD_PASSWORD', 'secret');
-
-        if ($password === $expected) {
+        $hash = config('dashboard.password_hash');
+        if ($hash && Hash::check($password, $hash)) {
+            $request->session()->regenerate();
             session(['dashboard_logged_in' => true]);
             return redirect('/');
         }
-
+        // Dev fallback when no hash configured
+        $plain = config('dashboard.password_plain', 'secret');
+        if (! $hash && $password === $plain) {
+            $request->session()->regenerate();
+            session(['dashboard_logged_in' => true]);
+            return redirect('/');
+        }
         return back()->with('login_error', 'Invalid password');
     }
 
@@ -75,13 +82,13 @@ class DashboardController extends Controller
                 DB::raw('DATE(timestamp) as date'),
                 DB::raw('MIN(timestamp) as first_punch'),
                 DB::raw('CASE WHEN COUNT(*) > 1 THEN MAX(timestamp) ELSE NULL END as last_punch'),
-                DB::raw('CASE WHEN COUNT(*) > 1 THEN (strftime("%s", MAX(timestamp)) - strftime("%s", MIN(timestamp))) ELSE NULL END as work_seconds')
+                DB::raw('CASE WHEN COUNT(*) > 1 THEN (TIMESTAMPDIFF(SECOND, MIN(timestamp), MAX(timestamp))) ELSE NULL END as work_seconds')
             )
             ->groupBy('user_id', DB::raw('DATE(timestamp)'));
 
         // Filters
         if ($type === 'daily' && $date) $sub->whereDate('timestamp', $date);
-        if ($type === 'monthly' && $month) $sub->whereRaw("strftime('%Y-%m', timestamp) = ?", [$month]);
+        if ($type === 'monthly' && $month) $sub->whereRaw("DATE_FORMAT(timestamp, '%Y-%m') = ?", [$month]);
         if ($type === 'user' && $user) $sub->where('user_id', $user);
 
         // Wrap for pagination
