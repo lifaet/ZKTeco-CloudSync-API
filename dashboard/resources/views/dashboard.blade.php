@@ -1428,10 +1428,10 @@ $(document).ready(function(){
 
                     html += '<tr style="height:32px;">'
                          + '<td style="' + td + '">' + esc(r.user_id) + '</td>'
-                         + '<td colspan="2" style="' + td + '">' + esc(name) + (subLine ? BR + '<span style="font-size:9pt; text-align:left;">' + esc(subLine) + '</span>' : '') + '</td>'
+                         + '<td colspan="2" style="' + td + ' text-align:right;">' + esc(name) + (subLine ? BR + '<span style="font-size:9pt;">' + esc(subLine) + '</span>' : '') + '</td>'
                          + '<td style="' + td + '">' + esc(checkOut) + '</td>'
                          + '<td style="' + td + '">' + esc(checkIn) + '</td>'
-                         + '<td colspan="2" style="' + td + '">' + esc(remark) + '</td>'
+                         + '<td colspan="2" style="' + td + ' text-align:right;">' + esc(remark) + '</td>'
                          + '</tr>';
 
                     plainLines.push([r.user_id, name + (subLine ? ' - ' + subLine : ''), checkOut, checkIn, remark].join('\t'));
