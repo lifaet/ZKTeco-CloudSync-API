@@ -9,6 +9,7 @@ DB_USER = 'root'
 DB_PASS = 'root'
 DB_NAME = 'zkteko-ams'
 TABLE_NAME = 'attendances'
+TABLE_NAME2 = 'attendance2'
 
 # For API server
 # API_TOKEN = "test12345"

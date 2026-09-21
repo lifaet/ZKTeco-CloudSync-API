@@ -3,7 +3,7 @@ from pymysql.err import OperationalError, Error as PyMySQLError
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from config import DB_HOST, DB_USER, DB_PASS, DB_NAME, TABLE_NAME
+from config import DB_HOST, DB_USER, DB_PASS, DB_NAME, TABLE_NAME, TABLE_NAME2
 
 def setup_logging():
     """Configure logging for database creation"""
@@ -152,6 +152,25 @@ def create_database_and_table():
                         ADD INDEX idx_created_at (created_at);
                     """)
 
+                # Create the second device attendance table used by the dashboard
+                logger.info(f"🔄 Creating table {TABLE_NAME2} if it doesn't exist...")
+                cursor.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {TABLE_NAME2} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        user_id VARCHAR(50) NOT NULL,
+                        timestamp DATETIME NOT NULL,
+                        status VARCHAR(50) DEFAULT NULL,
+                        punch VARCHAR(50) DEFAULT NULL,
+                        message VARCHAR(255) DEFAULT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uq_user_time (user_id, timestamp),
+                        INDEX idx_timestamp (timestamp),
+                        INDEX idx_user_id (user_id),
+                        INDEX idx_created_at (created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                """)
+
                 logger.info("✅ Database and table setup completed successfully")
                 return True
 
@@ -181,17 +200,17 @@ def verify_database_setup():
 
         with conn.cursor() as cursor:
             # Check if we can actually write to the table
-            cursor.execute(f"""
-                INSERT INTO {TABLE_NAME} 
-                (user_id, timestamp, status, created_at, updated_at)
-                VALUES ('TEST', NOW(), 'TEST', NOW(), NOW())
-            """)
-            
-            # Clean up test data
-            cursor.execute(f"""
-                DELETE FROM {TABLE_NAME} 
-                WHERE user_id = 'TEST' AND status = 'TEST'
-            """)
+            for table_name in (TABLE_NAME, TABLE_NAME2):
+                cursor.execute(f"""
+                    INSERT INTO {table_name}
+                    (user_id, timestamp, status, created_at, updated_at)
+                    VALUES ('TEST', NOW(), 'TEST', NOW(), NOW())
+                """)
+
+                cursor.execute(f"""
+                    DELETE FROM {table_name}
+                    WHERE user_id = 'TEST' AND status = 'TEST'
+                """)
             
             logger.info("✅ Database verification completed successfully")
             return True

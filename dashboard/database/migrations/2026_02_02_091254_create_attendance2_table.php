@@ -11,15 +11,17 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('attendance2', function (Blueprint $table) {
-            $table->id();
-            $table->string('user_id');
-            $table->timestamp('timestamp');
-            $table->string('status')->nullable();
-            $table->string('punch')->nullable();
-            $table->text('message')->nullable();
-            $table->timestamps();
-        });
+        if (! Schema::hasTable('attendance2')) {
+            Schema::create('attendance2', function (Blueprint $table) {
+                $table->id();
+                $table->string('user_id');
+                $table->timestamp('timestamp');
+                $table->string('status')->nullable();
+                $table->string('punch')->nullable();
+                $table->text('message')->nullable();
+                $table->timestamps();
+            });
+        }
     }
 
     /**
