@@ -1383,35 +1383,23 @@ $(document).ready(function(){
                 const lastWorkDay = res && res.last_working_day ? res.last_working_day : '';
 
                 const BR = '<br style="mso-data-placement:same-cell;">';
-                const td = 'border:1px solid #000; padding:0 8px; vertical-align:middle; text-align:center; line-height:1.2; mso-line-height-rule:exactly; height:30px;';
+                const td = 'border:1px solid #000; padding:4px 8px; vertical-align:middle;';
 
-                let html = '<table style="border-collapse:collapse; font-family:Arial, sans-serif; font-size:11pt; color:#000;">';
-                html += '<colgroup>'
-                     + '<col style="width:70px;">'
-                     + '<col style="width:180px;">'
-                     + '<col style="width:40px;">'
-                     + '<col style="width:110px;">'
-                     + '<col style="width:110px;">'
-                     + '<col style="width:220px;">'
-                     + '<col style="width:40px;">'
-                     + '</colgroup>';
-
-                html += '<tr style="height:42px;">'
-                     + '<td colspan="7" style="' + td + 'font-size:16pt; font-weight:bold; line-height:1.25; vertical-align:middle; padding:0 8px;">'
+                let html = '<table style="border-collapse:collapse; font-family:Arial, sans-serif; font-size:11pt;">';
+                // Title (merged across 5 columns)
+                html += '<tr><td colspan="5" style="' + td + 'text-align:center; font-size:16pt; font-weight:bold;">'
                      + 'Daily Attendance Record' + BR + 'Date: ' + fmtDMY(date) + '</td></tr>';
-
-                html += '<tr style="height:36px;">'
-                     + '<td style="' + td + ' font-weight:bold;">ID No.</td>'
-                     + '<td colspan="2" style="' + td + ' font-weight:bold;">Name</td>'
-                     + '<td style="' + td + ' font-weight:bold;">Check out' + BR + '(' + fmtDMY(lastWorkDay) + ')</td>'
-                     + '<td style="' + td + ' font-weight:bold;">Check in' + BR + '(' + fmtDMY(date) + ')</td>'
-                     + '<td colspan="2" style="' + td + ' font-weight:bold;">Remarks</td>'
-                     + '</tr>';
+                // Header row
+                const headers = ['ID No.', 'Name', 'Check out (' + fmtDMY(lastWorkDay) + ')', 'Check in (' + fmtDMY(date) + ')', 'Remarks'];
+                html += '<tr>' + headers.map(function(h) {
+                    return '<td style="' + td + ' font-weight:bold; text-align:center;">' + h + '</td>';
+                }).join('') + '</tr>';
 
                 // plain-text version (tab separated) for apps that only take text
-                let plainLines = ['Daily Attendance Record', 'Date: ' + fmtDMY(date), ['ID No.', 'Name', 'Check out (' + fmtDMY(lastWorkDay) + ')', 'Check in (' + fmtDMY(date) + ')', 'Remarks'].join('\t')];
+                let plainLines = ['Daily Attendance Record', 'Date: ' + fmtDMY(date), headers.join('\t')];
 
                 rows.forEach(function(r) {
+                    // name + designation + department (server-provided, directory fallback)
                     let name = r.name || '', title = r.title || '', dept = r.department || '';
                     if (!name) {
                         try {
@@ -1421,44 +1409,23 @@ $(document).ready(function(){
                     }
                     const subLine = title + (dept ? (title ? ', ' : '') + dept : '');
 
+                    // Check out: previous punch time; add its date if older than the last working day
                     let checkOut = fmtHM(r.prev_punch);
                     if (checkOut && r.prev_stale && r.prev_date) checkOut += ' (' + fmtDMY(r.prev_date) + ')';
+
+                    // Check in: today's first punch (blank when absent)
                     const checkIn = r.is_absent ? '' : fmtHM(r.first_punch);
-                    const remark = r.remarks || '';
 
-                    html += '<tr style="height:32px;">'
+                    html += '<tr>'
                          + '<td style="' + td + '">' + esc(r.user_id) + '</td>'
-                         + '<td colspan="2" style="' + td + ' text-align:left;">' + esc(name) + (subLine ? BR + '<span style="font-size:9pt;">' + esc(subLine) + '</span>' : '') + '</td>'
-                         + '<td style="' + td + '">' + esc(checkOut) + '</td>'
-                         + '<td style="' + td + '">' + esc(checkIn) + '</td>'
-                         + '<td colspan="2" style="' + td + ' text-align:left;">' + esc(remark) + '</td>'
+                         + '<td style="' + td + '">' + esc(name) + (subLine ? BR + '<span style="font-size:9pt;">' + esc(subLine) + '</span>' : '') + '</td>'
+                         + '<td style="' + td + ' text-align:center;">' + esc(checkOut) + '</td>'
+                         + '<td style="' + td + ' text-align:center;">' + esc(checkIn) + '</td>'
+                         + '<td style="' + td + '"></td>'
                          + '</tr>';
 
-                    plainLines.push([r.user_id, name + (subLine ? ' - ' + subLine : ''), checkOut, checkIn, remark].join('\t'));
+                    plainLines.push([r.user_id, name + (subLine ? ' - ' + subLine : ''), checkOut, checkIn, ''].join('\t'));
                 });
-
-                for (let i = 0; i < 4; i++) {
-                    html += '<tr style="height:28px;">'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '<td style="border:none; padding:0; vertical-align:middle; text-align:center; background-color:#fff;"></td>'
-                         + '</tr>';
-                }
-
-                html += '<tr>'
-                     + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; font-weight:bold; background-color:#fff;">Prepared by</td>'
-                     + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; font-weight:bold; background-color:#fff;">Secretary General</td>'
-                     + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '</tr>';
-
                 html += '</table>';
 
                 copyHtmlToClipboard(html, plainLines.join('\n')).then(function() {

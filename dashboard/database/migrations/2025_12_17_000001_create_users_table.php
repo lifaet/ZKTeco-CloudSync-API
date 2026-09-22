@@ -13,6 +13,7 @@ return new class extends Migration
      */
     public function up()
     {
+        if (Schema::hasTable('users')) return;
         Schema::create('users', function (Blueprint $table) {
             // Use integer id to match device/user IDs (not auto-incrementing)
             $table->integer('id')->primary();
