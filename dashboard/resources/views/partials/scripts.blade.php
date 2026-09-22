@@ -280,8 +280,8 @@ function loadDashboardCharts(){
         const c1el = document.getElementById('dashChartPresent');
         if(c1el) dashC1 = new Chart(c1el, {
             type: 'line',
-            data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.12)', fill: true, tension: 0.35, spanGaps: false, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 }] },
-            options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, scales: { x: { grid: { color: 'rgba(100,116,139,0.08)' } }, y: { min:0, max:100, ticks: { stepSize: 10, callback: v => v+'%' }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'No data' : ctx.parsed.y+'% (' + (res.daily_present[ctx.dataIndex].present||0) + '/' + (res.daily_present[ctx.dataIndex].total||0) + ')' } } } }
+            data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.12)', fill: true, tension: 0.35, spanGaps: false, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2, clip: false }] },
+            options: { responsive: true, maintainAspectRatio: false, layout: { padding: { top: 8, right: 6 } }, interaction: { intersect: false, mode: 'index' }, scales: { x: { grid: { color: 'rgba(100,116,139,0.08)' } }, y: { min:0, max:100, grace: '4%', ticks: { stepSize: 20, callback: v => v+'%' }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'No data' : ctx.parsed.y+'% (' + (res.daily_present[ctx.dataIndex].present||0) + '/' + (res.daily_present[ctx.dataIndex].total||0) + ')' } } } }
         });
         // dept avg
         const deptLabels = res.dept_avg.map(x => x.dept);

@@ -33,19 +33,23 @@ class AnalyticsController extends Controller
         $start = Carbon::parse($month . '-01');
         $end = $start->copy()->endOfMonth();
         $activeCount = User::where('active', true)->count();
+        $activeIds = User::where('active', true)->pluck('id')->toArray();
         $todayStr = Carbon::today()->toDateString();
         $dailyPresent = [];
         $cursor = $start->copy();
         while ($cursor->lte($end)) {
             $dateStr = $cursor->toDateString();
-            $isWeekend = in_array($cursor->dayOfWeek, $weekendDays);
-            $isHoliday = in_array($dateStr, $holidays);
+            $isWeekend = in_array((int)$cursor->dayOfWeek, array_map('intval', (array)$weekendDays));
+            $isHoliday = in_array($dateStr, (array)$holidays);
             $isFuture = $dateStr > $todayStr;
             if ($isWeekend || $isHoliday || $isFuture) {
                 $dailyPresent[] = ['date' => $dateStr, 'pct' => null];
             } else {
-                $present = DB::table('attendances')->whereDate('timestamp', $dateStr)->select('user_id')->distinct()->count();
-                $pct = $activeCount ? round(min(100, $present / $activeCount * 100), 1) : 0;
+                $present = 0;
+                if ($activeCount && !empty($activeIds)) {
+                    $present = DB::table('attendances')->whereDate('timestamp', $dateStr)->whereIn('user_id', $activeIds)->distinct()->count('user_id');
+                }
+                $pct = $activeCount ? round($present / $activeCount * 100, 1) : 0;
                 $dailyPresent[] = ['date' => $dateStr, 'pct' => $pct, 'present' => $present, 'total' => $activeCount];
             }
             $cursor->addDay();
@@ -85,8 +89,8 @@ class AnalyticsController extends Controller
         $cursor = Carbon::today()->subDays(29);
         for ($i=0; $i<30; $i++) {
             $date = $cursor->toDateString();
-            $isWeekend = in_array($cursor->dayOfWeek, $weekendDays);
-            $isHoliday = in_array($date, $holidays);
+            $isWeekend = in_array((int)$cursor->dayOfWeek, array_map('intval', (array)$weekendDays));
+            $isHoliday = in_array($date, (array)$holidays);
             if ($isWeekend || $isHoliday) {
                 $lateTrend[] = ['date' => $date, 'late' => null];
             } else {
