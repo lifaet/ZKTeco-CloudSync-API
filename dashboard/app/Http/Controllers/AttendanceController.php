@@ -127,6 +127,42 @@ class AttendanceController extends Controller
                 }
             }
 
+            // --- Tier 1: Department filter (server-side) ---
+            if ($dept = $request->query('dept', $request->input('dept'))) {
+                $deptLower = strtolower(trim($dept));
+                if ($deptLower !== '' && $deptLower !== 'all') {
+                    $data = array_filter($data, function($row) use ($deptLower) {
+                        return strtolower($row['department'] ?? '') === $deptLower;
+                    });
+                    $data = array_values($data);
+                }
+            }
+
+            // --- Flag: single status from first_punch with +-5 min grace around office_start ---
+            $officeStart = Setting::getValue('office_start', '09:30');
+            $officeEnd = Setting::getValue('office_end', '17:00');
+            $grace = (int)Setting::getValue('office_grace', 5);
+            [$oh, $om] = array_map('intval', explode(':', $officeStart));
+            $officeMin = $oh * 60 + $om;
+            foreach ($data as &$r) {
+                $r['late_flag'] = false;
+                $r['early_flag'] = false;
+                $r['late_status'] = 'on_time';
+                if (!$r['is_absent'] && $r['first_punch'] && $r['first_punch'] !== 'Absent') {
+                    $fp = substr($r['first_punch'], 0, 5);
+                    if (preg_match('/^\d{2}:\d{2}/', $fp)) {
+                        [$fh, $fm] = array_map('intval', explode(':', $fp));
+                        $fpMin = $fh * 60 + $fm;
+                        $diff = $fpMin - $officeMin;
+                        if ($diff > $grace) { $r['late_flag'] = true; $r['late_status'] = 'late'; }
+                        elseif ($diff < -$grace) { $r['early_flag'] = true; $r['late_status'] = 'early'; }
+                        else { $r['late_status'] = 'on_time'; }
+                    }
+                }
+                if ($r['is_absent']) { $r['late_status'] = 'absent'; $r['late_flag'] = false; $r['early_flag'] = false; }
+            }
+            unset($r);
+
             // Apply search filter if provided — now checks Name/Title/Department as well (not just punches)
             if ($search = $request->input('search.value')) {
                 $data = array_filter($data, function($row) use ($search) {
@@ -143,6 +179,22 @@ class AttendanceController extends Controller
 
             $recordsTotal = count($data);
             $recordsFiltered = $recordsTotal;
+
+            // --- Tier 1: Work Hours Summary Card (before paginate, after filters) ---
+            $present = 0; $absent = 0; $late = 0; $totalWorkSec = 0; $workCount = 0;
+            foreach ($data as $r) {
+                if ($r['is_absent']) $absent++; else $present++;
+                if (!empty($r['late_flag'])) $late++;
+                if (!$r['is_absent'] && !empty($r['work_time'])) {
+                    $parts = explode(':', $r['work_time']);
+                    if (count($parts) >= 2) {
+                        $sec = ((int)$parts[0]*3600) + ((int)$parts[1]*60) + ((int)($parts[2] ?? 0));
+                        $totalWorkSec += $sec; $workCount++;
+                    }
+                }
+            }
+            $avgWork = $workCount ? gmdate('H:i', intdiv($totalWorkSec, $workCount)) : '—';
+            $summary = ['present'=>$present,'absent'=>$absent,'late'=>$late,'avg_work'=>$avgWork,'office_start'=>$officeStart,'office_end'=>$officeEnd];
 
             // Sort by custom user view order (users without an order go last, sorted by user_id)
             $orderMap = User::whereNotNull('view_order')->pluck('view_order', 'id')->toArray();
@@ -164,6 +216,7 @@ class AttendanceController extends Controller
                 'recordsFiltered' => $recordsFiltered,
                 'data' => $paged,
                 'last_working_day' => $lastWorkingDay,
+                'summary' => $summary,
             ]);
         }
 

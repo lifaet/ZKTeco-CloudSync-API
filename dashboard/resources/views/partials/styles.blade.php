@@ -353,10 +353,18 @@ div.dataTables_wrapper { overflow: visible !important; }
 #attendanceTable tbody tr.row-absent:hover {
     background: rgba(254, 226, 226, 0.9) !important;
 }
-#attendanceTable tbody tr.row-short {
+#attendanceTable tbody tr.row-late {
+            background: rgba(234,179,8,0.08) !important;
+            border-left: 3px solid #eab308;
+        }
+        .row-short {
     background: rgba(254, 249, 195, 0.75) !important; /* light yellow for <8h */
 }
-#attendanceTable tbody tr.row-short:hover {
+#attendanceTable tbody tr.row-late {
+            background: rgba(234,179,8,0.08) !important;
+            border-left: 3px solid #eab308;
+        }
+        .row-short:hover {
     background: rgba(253, 244, 155, 0.85) !important;
 }
 

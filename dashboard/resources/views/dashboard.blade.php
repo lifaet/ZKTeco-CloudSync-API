@@ -26,14 +26,16 @@
 
 <!-- Sidebar Navigation -->
 <div class="sidebar" id="sidebar">
-    <a href="#" data-type="daily" class="active"><i class="bi bi-calendar-day"></i> Daily</a>
+    <a href="#" data-type="dashboard" class="active"><i class="bi bi-speedometer2"></i> Dashboard</a>
+    <a href="#" data-type="daily"><i class="bi bi-calendar-day"></i> Daily</a>
     <a href="#" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
     <a href="#" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
     <a href="#" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
     @if(env('ATTENDANCE2_ENABLED'))
-    <a href="/attendance2" id="attendance2Link"><i class="bi bi-clock"></i> Attendance2 <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
+    <a href="/attendance2" id="attendance2Link"><i class="bi bi-shield-lock"></i> Door Monitor <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
     @endif
     <hr>
+    <a href="#" id="settingsMenuBtn"><i class="bi bi-gear"></i> Settings</a>
     <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
 </div>
 
@@ -42,7 +44,8 @@
     <div class="content-wrapper">
     <div class="filters d-flex align-items-center gap-2 flex-nowrap" style="margin-bottom: 1rem; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch;">
         <!-- Type selector — single pill -->
-        <select id="filter-type" class="form-select form-select-sm" style="width:105px; min-width:105px;">
+        <select id="filter-type" class="form-select form-select-sm" style="width:115px; min-width:115px;">
+            <option value="dashboard">Dashboard</option>
             <option value="daily">Daily</option>
             <option value="monthly">Monthly</option>
             <option value="user">User</option>
@@ -92,6 +95,64 @@
         </div>
     </div>
 
+    <div id="dashboardSection">
+    <!-- Dashboard: summary + charts (present/absent/late + analytics) -->
+    <div id="summaryCards" class="row g-2 mb-3 d-none">
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
+                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(34,197,94,0.15); color:#16a34a;"><i class="bi bi-check-circle"></i></div>
+                    <div><div class="small text-muted" style="font-size:0.7rem;">Present</div><div class="fw-bold" id="sumPresent">—</div></div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
+                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(239,68,68,0.15); color:#dc2626;"><i class="bi bi-x-circle"></i></div>
+                    <div><div class="small text-muted" style="font-size:0.7rem;">Absent</div><div class="fw-bold" id="sumAbsent">—</div></div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
+                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(234,179,8,0.2); color:#a16207;"><i class="bi bi-clock-history"></i></div>
+                    <div><div class="small text-muted" style="font-size:0.7rem;">Late</div><div class="fw-bold" id="sumLate">—</div></div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
+                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(2,132,199,0.15); color:#0284c7;"><i class="bi bi-stopwatch"></i></div>
+                    <div><div class="small text-muted" style="font-size:0.7rem;">Avg Work</div><div class="fw-bold" id="sumAvg">—</div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Dashboard charts (daily only) - combines analytics -->
+    <div id="dashboardCharts" class="row g-3 mb-3 d-none">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
+                <div class="card-header d-flex align-items-center gap-2" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-bar-chart"></i> Daily Attendance % (this month) <span class="ms-auto small text-muted" id="dashOffice"></span></div>
+                <div class="card-body" style="height:220px;"><canvas id="dashChartPresent"></canvas></div>
+            </div>
+        </div>
+        <div class="col-12 col-lg-6">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
+                <div class="card-header" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-people"></i> Dept Avg Work Hours</div>
+                <div class="card-body" style="height:260px;"><canvas id="dashChartDept"></canvas></div>
+            </div>
+        </div>
+        <div class="col-12 col-lg-6">
+            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
+                <div class="card-header" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-clock-history"></i> Late Arrivals — Last 30 Days</div>
+                <div class="card-body" style="height:260px;"><canvas id="dashChartLate"></canvas></div>
+            </div>
+        </div>
+    </div>
+    </div>
     <div id="attendanceSection">
     <table id="attendanceTable" class="table table-striped table-bordered">
         <thead>
@@ -102,6 +163,7 @@
                 <th>First Punch</th>
                 <th>Last Punch</th>
                 <th>Work Time</th>
+                <th>Flag</th>
                 <th>Type</th>
                 <th>VerifyID</th>
                 <th>Actions</th>
@@ -173,6 +235,16 @@
                         <div class="form-check"><input class="form-check-input weekend-day" type="checkbox" value="6" id="wd-6"><label class="form-check-label" for="wd-6">Saturday</label></div>
                     </div>
                     <small class="text-muted">Used to find the previous working day for the "Last Day Last Punch" column.</small>
+                </div>
+                <hr>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Office Hours</label>
+                    <div class="row g-2" style="max-width:360px;">
+                        <div class="col-4"><label class="form-label small">Start</label><input type="time" id="office-start" class="form-control form-control-sm" value="09:30"></div>
+                        <div class="col-4"><label class="form-label small">End</label><input type="time" id="office-end" class="form-control form-control-sm" value="17:00"></div>
+                        <div class="col-4"><label class="form-label small">Tolerance &plusmn; (min)</label><input type="number" id="office-grace" class="form-control form-control-sm" value="5" min="0" max="60"></div>
+                    </div>
+                    <small class="text-muted">On time within &plusmn; tolerance of Start (first punch only). Late &gt; +tolerance, Early &lt; -tolerance</small>
                 </div>
                 <hr>
                 <div class="mb-2">
@@ -365,6 +437,7 @@
 <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 @include('partials.scripts')
 
 </body>

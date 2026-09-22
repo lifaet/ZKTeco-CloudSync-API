@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\Attendance2Controller;
+use App\Http\Controllers\AnalyticsController;
 use App\Http\Middleware\DashboardAuth;
 
 // Public
@@ -26,6 +27,7 @@ Route::middleware(DashboardAuth::class)->group(function () {
     Route::get('/attendance2', [Attendance2Controller::class, 'index']);
     Route::get('/api/attendance2-summary', [Attendance2Controller::class, 'data']);
     Route::get('/api/attendance2-latest', [Attendance2Controller::class, 'latest']);
+    Route::get('/api/door-pulse', [Attendance2Controller::class, 'summary']);
 });
 
 // Primary attendance (1 device = standard)
@@ -42,4 +44,6 @@ Route::middleware(DashboardAuth::class)->group(function () {
     Route::delete('/api/users/{id}', [\App\Http\Controllers\UserController::class, 'destroy']);
     Route::get('/api/settings', [\App\Http\Controllers\SettingController::class, 'index']);
     Route::post('/api/settings', [\App\Http\Controllers\SettingController::class, 'update']);
+    Route::get('/api/analytics', [AnalyticsController::class, 'data']);
 });
+Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(DashboardAuth::class);

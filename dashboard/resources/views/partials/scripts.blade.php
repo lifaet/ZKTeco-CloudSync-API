@@ -1,6 +1,6 @@
 <script>
 let table;
-let currentType = 'daily';
+let currentType = 'dashboard';
 let lastCheckId = 0; // last known entry ID
 // Polling interval (ms) for /api/check-latest. Lower values = more frequent checks.
 // Be careful lowering too far: very frequent polling increases DB/load. Default 2000ms = 2s.
@@ -78,21 +78,66 @@ function updateFilters(type){
     $('#filter-type').val(type);
 
     // show/hide inputs
-    $('#filter-date').toggleClass('d-none', type !== 'daily');
+    const isDailyLike = (type === 'daily' || type === 'dashboard');
+    $('#filter-date').toggleClass('d-none', !isDailyLike);
     $('#filter-month').toggleClass('d-none', type !== 'monthly');
     $('#filter-user').toggleClass('d-none', type !== 'user');
     $('#filter-user-select').toggleClass('d-none', type !== 'user');
-    $('#filter-dept').toggleClass('d-none', type !== 'daily');
+    $('#filter-dept').toggleClass('d-none', type !== 'daily'); // dept only for log table
+    // dashboard vs daily: dashboard = charts+summary, daily = table+summary, others hide both
+    if (type === 'dashboard') {
+        $('#dashboardSection').removeClass('d-none');
+        $('#summaryCards').removeClass('d-none');
+        $('#dashboardCharts').removeClass('d-none');
+        $('#attendanceSection').addClass('d-none');
+        $('#userSection').addClass('d-none');
+        $('#copy-daily, #export-daily, #formatted-copy').addClass('d-none');
+        $('#addAttendanceBtn').addClass('d-none');
+        $('.colvis-dropdown').addClass('d-none');
+    } else if (type === 'daily') {
+        $('#dashboardSection').removeClass('d-none');
+        $('#summaryCards').removeClass('d-none');
+        $('#dashboardCharts').addClass('d-none');
+        $('#attendanceSection').removeClass('d-none');
+        $('#userSection').addClass('d-none');
+        // copy/export handled separately via drawCallback but ensure visible
+        $('#addAttendanceBtn').removeClass('d-none');
+        $('.colvis-dropdown').removeClass('d-none');
+    } else if (type === 'directory') {
+        $('#dashboardSection').addClass('d-none');
+        $('#attendanceSection').addClass('d-none');
+        $('#userSection').removeClass('d-none');
+    } else {
+        // monthly / user : table only, no dashboard
+        $('#dashboardSection').addClass('d-none');
+        $('#attendanceSection').removeClass('d-none');
+        $('#userSection').addClass('d-none');
+    }
+    if (type === 'dashboard') {
+        // fetch dashboard summary (present/absent/late/avg) for today
+        const dashDate = $('#filter-date').val() || new Date().toISOString().slice(0,10);
+        $.getJSON('/api/attendance-summary', { type: 'daily', date: dashDate, dept: '', draw: 1, start: 0, length: 1 }).done(function(j){
+            if (j && j.summary) {
+                $('#sumPresent').text(j.summary.present ?? '—');
+                $('#sumAbsent').text(j.summary.absent ?? '—');
+                $('#sumLate').text(j.summary.late ?? '—');
+                $('#sumAvg').text(j.summary.avg_work ?? '—');
+                $('#dashOffice').text('Office: ' + (j.summary.office_start||'09:30') + ' – ' + (j.summary.office_end||'17:00'));
+            }
+        });
+        if (typeof loadDashboardCharts === 'function') loadDashboardCharts();
+    }
 
     // show prev/next controls only for relevant types
-    $('.prev-day, .next-day').toggle(type === 'daily');
+    $('.prev-day, .next-day').toggle(type === 'daily' || type === 'dashboard');
     $('.prev-month, .next-month').toggle(type === 'monthly');
 
     // copy/export only for daily
     $('#copy-daily, #export-daily, #formatted-copy').toggleClass('d-none', type !== 'daily');
 
-    // "Last Day Last Punch" column only makes sense on the daily view
+    // "Last Day Last Punch" and Flag only for daily (not monthly/user/dashboard)
     try { if (typeof table !== 'undefined' && table && table.column) table.column(2).visible(type === 'daily'); } catch(e) {}
+    try { if (typeof table !== 'undefined' && table && table.column) table.column(6).visible(type === 'daily'); } catch(e) {}
 
     // hide apply-filter for user page
     $('#apply-filter').toggleClass('d-none', type === 'directory');
@@ -124,32 +169,15 @@ function loadDeptFilter(){
     if (cur) sel.val(cur);
 }
 
-// Dept filter — DataTables custom search (client-side, no backend change)
-$.fn.dataTable.ext.search.push(function(settings, data, dataIndex){
-    if (settings.nTable && settings.nTable.id !== 'attendanceTable') return true;
-    const deptFilter = ($('#filter-dept').val() || '').trim().toLowerCase();
-    if (!deptFilter || currentType !== 'daily') return true;
-    try {
-        const row = settings.oInstance.api().row(dataIndex).data();
-        if (!row) return true;
-        const dept = ((row.department || row.dept || '') + '').toLowerCase();
-        // fallback to userDirectory
-        if (!dept && row.user_id) {
-            const s = (window.userDirectory || []).find(x => String(x.id) === String(row.user_id));
-            const d2 = (s && (s.department || s.dept) || '').toLowerCase();
-            return d2 === deptFilter;
-        }
-        return dept === deptFilter;
-    } catch(e){ return true; }
-});
+// Dept filter now server-side via d.dept — client filter removed
 
 function initColvis(){
     const menu = $('#colvisMenu');
     if (!menu.length || !table) return;
     const cols = [
         { idx: 2, label: 'Last Day Punch' },
-        { idx: 6, label: 'Type' },
-        { idx: 7, label: 'VerifyID' }
+        { idx: 7, label: 'Type' },
+        { idx: 8, label: 'VerifyID' }
     ];
     menu.empty();
     cols.forEach(c => {
@@ -163,7 +191,7 @@ function showSkeleton(){
     if (!tbody.length) return;
     tbody.empty();
     for(let i=0;i<5;i++){
-        tbody.append(`<tr class="skeleton-row"><td><span class="skeleton" style="width:60%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:70%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:20%"></span></td></tr>`);
+        tbody.append(`<tr class="skeleton-row"><td><span class="skeleton" style="width:60%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:70%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:20%"></span></td></tr>`);
     }
 }
 
@@ -215,16 +243,17 @@ function initDoorBadge(){
     if (!badge.length) return;
     function refresh(){
         // attendance2 may not be enabled — fail silently
-        $.getJSON('/api/attendance2/summary', { date: new Date().toISOString().slice(0,10) }).done(function(res){
-            const count = (res && (res.total || (res.data && res.data.length) || res.count)) || 0;
+        $.getJSON('/api/door-pulse').done(function(res){
+            const count = (res && (res.count ?? res.recordsTotal ?? res.total ?? (res.data && res.data.length) ?? res.count)) || 0;
             if (count > 0) badge.text(count + ' today').show();
             else badge.text('0 today').show();
         }).fail(function(){
-            // try alternative endpoint
-            $.getJSON('/api/check-latest', { type: 'door' }).done(function(res){
-                const c = res && res.count ? res.count : null;
-                if (c !== null) badge.text(c + ' today').show();
-            }).fail(function(){});
+            $.getJSON('/api/attendance2-summary', { start:0, length:1, draw:1 }).done(function(res){ const c=(res&&res.recordsTotal)||0; badge.text(c+' today').show(); }).fail(function(){
+                $.getJSON('/api/check-latest', { type: 'door' }).done(function(res){
+                    const c = res && res.count ? res.count : null;
+                    if (c !== null) badge.text(c + ' today').show();
+                }).fail(function(){});
+            });
         });
     }
     refresh();
@@ -233,6 +262,49 @@ function initDoorBadge(){
 
 
 
+let dashC1=null, dashC2=null, dashC3=null;
+function loadDashboardCharts(){
+    if (currentType !== 'dashboard') return;
+    const dateVal = $('#filter-date').val() || new Date().toISOString().slice(0,10);
+    const month = dateVal.slice(0,7);
+    if (loadDashboardCharts._lastMonth === month && loadDashboardCharts._loading) return;
+    loadDashboardCharts._lastMonth = month;
+    loadDashboardCharts._loading = true;
+    $.getJSON('/api/analytics', { month }, function(res){
+        loadDashboardCharts._loading = false;
+        $('#dashOffice').text('Office: ' + (res.office_start||'09:30') + ' – ' + (res.office_end||'17:00'));
+        // present %
+        const labels1 = res.daily_present.map(x => x.date.slice(8));
+        const data1 = res.daily_present.map(x => x.pct);
+        if(dashC1) try{ dashC1.destroy(); }catch(e){}
+        const c1el = document.getElementById('dashChartPresent');
+        if(c1el) dashC1 = new Chart(c1el, {
+            type: 'line',
+            data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.12)', fill: true, tension: 0.35, spanGaps: false, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 }] },
+            options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, scales: { x: { grid: { color: 'rgba(100,116,139,0.08)' } }, y: { min:0, max:100, ticks: { stepSize: 10, callback: v => v+'%' }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'No data' : ctx.parsed.y+'% (' + (res.daily_present[ctx.dataIndex].present||0) + '/' + (res.daily_present[ctx.dataIndex].total||0) + ')' } } } }
+        });
+        // dept avg
+        const deptLabels = res.dept_avg.map(x => x.dept);
+        const deptHours = res.dept_avg.map(x => (x.avg_sec/3600).toFixed(2));
+        if(dashC2) try{ dashC2.destroy(); }catch(e){}
+        const c2el = document.getElementById('dashChartDept');
+        if(c2el) dashC2 = new Chart(c2el, {
+            type: 'bar',
+            data: { labels: deptLabels, datasets: [{ label: 'Avg Hours', data: deptHours, backgroundColor: 'rgba(2,132,199,0.65)', borderColor: '#0284c7', borderWidth: 1, borderRadius: 4 }]},
+            options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, scales: { x: { min:0, max:12, title: { display:true, text:'Hours' }, grid: { color: 'rgba(100,116,139,0.08)' } }, y: { grid: { display: false } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.raw + ' h (' + res.dept_avg[ctx.dataIndex].avg_hours + ')' } } } }
+        });
+        // late
+        const lateLabels = res.late_trend.map(x => x.date.slice(5));
+        const lateData = res.late_trend.map(x => x.late);
+        if(dashC3) try{ dashC3.destroy(); }catch(e){}
+        const c3el = document.getElementById('dashChartLate');
+        if(c3el) dashC3 = new Chart(c3el, {
+            type: 'bar',
+            data: { labels: lateLabels, datasets: [{ label: 'Late', data: lateData, backgroundColor: 'rgba(234,179,8,0.75)', borderColor: '#a16207', borderWidth: 1, borderRadius: 3, skipNull: true }]},
+            options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false }, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 15 } }, y: { beginAtZero:true, ticks:{ stepSize:1, precision:0 }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'Weekend/Holiday' : ctx.parsed.y + ' late' } } } }
+        });
+    }).fail(function(){ loadDashboardCharts._loading = false; });
+}
 function showToast(title, message){
     const isError = /error|fail|invalid/i.test(title);
     const toastId = 'toast-' + Date.now();
@@ -344,6 +416,7 @@ $(document).ready(function(){
                 d.date = $('#filter-date').val();
                 d.month = $('#filter-month').val();
                 d.user = $('#filter-user').val();
+                d.dept = $('#filter-dept').val() || '';
             },
             error: function(xhr, textStatus, error){
                 console.error('DataTables ajax error', xhr && xhr.status, textStatus, error);
@@ -396,6 +469,12 @@ $(document).ready(function(){
             } },
             { data: 'last_punch', render: d => d ? d : '' },
             { data: 'work_time', render: d => d ? d : '' },
+            { data: 'late_status', render: function(d, type, row){
+                if (row.is_absent) return '<span class="badge bg-danger">Absent</span>';
+                if (d === 'late') return '<span class="badge bg-warning text-dark">Late</span>';
+                if (d === 'early') return '<span class="badge bg-info">Early</span>';
+                return '<span class="badge bg-success">On Time</span>';
+            }},
             { data: 'punch', render: function(d, type, row) {
                 // treat numeric/string 255 as automatic machine-sourced
                 if (d == 255 || d === '255') return '<span class="badge bg-info text-white">Auto</span>';
@@ -429,6 +508,7 @@ $(document).ready(function(){
         pageLength: 25,
         createdRow: function(row, data){
             if (data.is_absent) $(row).addClass('row-absent');
+            else if (data.late_flag) $(row).addClass('row-late');
             else if (data.work_time) {
                 const parts = String(data.work_time).split(':');
                 const h = parseInt(parts[0]||0,10), m = parseInt(parts[1]||0,10);
@@ -444,6 +524,15 @@ $(document).ready(function(){
                 // update empty date hint
                 const d = $('#filter-date').val() || '';
                 $('.js-empty-date').text(d);
+                // summary for daily table (dashboard summary is fetched separately)
+                if (json && json.summary && currentType === 'daily') {
+                    $('#sumPresent').text(json.summary.present ?? '—');
+                    $('#sumAbsent').text(json.summary.absent ?? '—');
+                    $('#sumLate').text(json.summary.late ?? '—');
+                    $('#sumAvg').text(json.summary.avg_work ?? '—');
+                    // keep summary visible (dashboardSection handles visibility)
+                }
+                // dashboard charts are handled via loadDashboardCharts for dashboard type, not here
             } catch(e){}
         },
         preDrawCallback: function(settings){
@@ -529,21 +618,27 @@ $(document).ready(function(){
     // initialize filter UI for current view via URL hash (deep-linking)
     // Supported hashes: #daily (default), #monthly, #user, #directory
     function applyView(view) {
-        const selected = view || 'daily';
+        const selected = view || 'dashboard';
         currentType = selected;
         $('.sidebar a').removeClass('active');
         // mark matching sidebar item active
         $('.sidebar a').each(function(){ if ($(this).data('type') === selected) $(this).addClass('active'); });
-        // show/hide main sections
+        // show/hide main sections - dashboard vs daily vs others
         if (selected === 'directory') {
+            $('#dashboardSection').addClass('d-none');
             $('#attendanceSection').addClass('d-none');
             $('#userSection').removeClass('d-none');
+        } else if (selected === 'dashboard') {
+            // handled in updateFilters, but ensure correct here too
+            $('#userSection').addClass('d-none');
+            // dashboardSection visibility handled in updateFilters
         } else {
             $('#userSection').addClass('d-none');
-            $('#attendanceSection').removeClass('d-none');
+            // attendanceSection visibility handled in updateFilters
         }
         updateFilters(selected);
-        if (selected !== 'directory' && table && table.ajax && typeof table.ajax.reload === 'function') {
+        // reload table only for table views, not dashboard/directory
+        if (selected !== 'directory' && selected !== 'dashboard' && table && table.ajax && typeof table.ajax.reload === 'function') {
             table.ajax.reload();
             // Delay adjust so DOM reflow/animations complete before recalculating widths
             setTimeout(function(){
@@ -552,10 +647,10 @@ $(document).ready(function(){
         }
     }
 
-    // set view from current hash (strip leading '#')
+    // set view from current hash (strip leading '#') - default dashboard (first menu)
     function setViewFromHash() {
         const hash = (window.location.hash || '').replace(/^#/, '');
-        applyView(hash || 'daily');
+        applyView(hash || 'dashboard');
     }
 
     // clicking sidebar items updates the URL hash — hashchange handles the actual view change
@@ -873,6 +968,7 @@ $(document).ready(function(){
         });
     }
 
+    $('#settingsMenuBtn').click(function(e){ e.preventDefault(); $('#settingsModal').modal('show'); });
     $('#settingsBtn').click(function(){
         $.ajax({ url: '/api/settings', method: 'GET', dataType: 'json', cache: false })
             .done(function(res){
@@ -882,6 +978,9 @@ $(document).ready(function(){
                 });
                 settingsHolidays = (res && Array.isArray(res.holidays)) ? res.holidays : [];
                 renderHolidayList();
+                $('#office-start').val(res.office_start || '09:30');
+                $('#office-end').val(res.office_end || '17:00');
+                $('#office-grace').val(res.office_grace ?? 5);
                 $('#settingsModal').modal('show');
             }).fail(function(){
                 showToast('Error', 'Failed to load settings');
@@ -904,14 +1003,17 @@ $(document).ready(function(){
 
     $('#saveSettingsBtn').click(function(){
         const weekendDays = $('.weekend-day:checked').map(function(){ return Number($(this).val()); }).get();
+        const officeStart = $('#office-start').val() || '09:30';
+        const officeEnd = $('#office-end').val() || '17:00';
+        const officeGrace = parseInt($('#office-grace').val() || '5', 10) || 5;
         $.ajax({
             url: '/api/settings',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays })
+            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays, office_start: officeStart, office_end: officeEnd, office_grace: officeGrace })
         }).done(function(){
             $('#settingsModal').modal('hide');
-            showToast('Saved', 'Weekend & holiday settings updated');
+            showToast('Saved', 'Settings updated');
             if (table && table.ajax && typeof table.ajax.reload === 'function') table.ajax.reload(null, false);
         }).fail(function(xhr){
             const msg = (xhr && xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : 'Failed to save settings';

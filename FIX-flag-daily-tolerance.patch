@@ -1,0 +1,152 @@
+From 62270c1af0b76647373adfbd65a80e67c5dd8346 Mon Sep 17 00:00:00 2001
+From: ZKTeco <lifaet@zkteco.local>
+Date: Tue, 22 Sep 2026 08:06:33 +0000
+Subject: [PATCH] fix: flag daily only + tolerance setting
+
+---
+ .../app/Http/Controllers/AnalyticsController.php    |  4 ++--
+ .../app/Http/Controllers/AttendanceController.php   |  2 +-
+ .../app/Http/Controllers/SettingController.php      |  5 +++++
+ dashboard/resources/views/dashboard.blade.php       |  9 +++++----
+ .../resources/views/partials/scripts.blade.php      | 13 ++++++++-----
+ 5 files changed, 21 insertions(+), 12 deletions(-)
+
+diff --git a/dashboard/app/Http/Controllers/AnalyticsController.php b/dashboard/app/Http/Controllers/AnalyticsController.php
+index 1c59146..d62ca49 100644
+--- a/dashboard/app/Http/Controllers/AnalyticsController.php
++++ b/dashboard/app/Http/Controllers/AnalyticsController.php
+@@ -77,8 +77,8 @@ public function data(Request $request)
+         }
+         usort($deptAvg, fn($a,$b) => $b['avg_sec'] <=> $a['avg_sec']);
+ 
+-        // 3. Late trend (last 30 days) - +-5 min grace on first punch only
+-        $grace = 5;
++        // 3. Late trend (last 30 days) - +- grace on first punch only
++        $grace = (int)Setting::getValue('office_grace', 5);
+         [$oh, $om] = array_map('intval', explode(':', $officeStart));
+         $officeMin = $oh * 60 + $om;
+         $lateTrend = [];
+diff --git a/dashboard/app/Http/Controllers/AttendanceController.php b/dashboard/app/Http/Controllers/AttendanceController.php
+index a3d04e5..b63f49f 100644
+--- a/dashboard/app/Http/Controllers/AttendanceController.php
++++ b/dashboard/app/Http/Controllers/AttendanceController.php
+@@ -141,7 +141,7 @@ public function data(Request $request)
+             // --- Flag: single status from first_punch with +-5 min grace around office_start ---
+             $officeStart = Setting::getValue('office_start', '09:30');
+             $officeEnd = Setting::getValue('office_end', '17:00');
+-            $grace = 5; // minutes
++            $grace = (int)Setting::getValue('office_grace', 5);
+             [$oh, $om] = array_map('intval', explode(':', $officeStart));
+             $officeMin = $oh * 60 + $om;
+             foreach ($data as &$r) {
+diff --git a/dashboard/app/Http/Controllers/SettingController.php b/dashboard/app/Http/Controllers/SettingController.php
+index b5bb74b..988bedf 100644
+--- a/dashboard/app/Http/Controllers/SettingController.php
++++ b/dashboard/app/Http/Controllers/SettingController.php
+@@ -17,6 +17,7 @@ public function index()
+             'holidays' => Setting::getValue('holidays', []),
+             'office_start' => Setting::getValue('office_start', '09:30'),
+             'office_end' => Setting::getValue('office_end', '17:00'),
++            'office_grace' => Setting::getValue('office_grace', 5),
+         ]);
+     }
+ 
+@@ -30,6 +31,7 @@ public function update(Request $request)
+             'holidays.*' => 'date_format:Y-m-d',
+             'office_start' => 'sometimes|string|regex:/^\d{2}:\d{2}$/',
+             'office_end' => 'sometimes|string|regex:/^\d{2}:\d{2}$/',
++            'office_grace' => 'sometimes|integer|min:0|max:60',
+         ]);
+ 
+         if (array_key_exists('weekend_days', $data)) {
+@@ -46,6 +48,9 @@ public function update(Request $request)
+         if (array_key_exists('office_end', $data)) {
+             Setting::setValue('office_end', $data['office_end']);
+         }
++        if (array_key_exists('office_grace', $data)) {
++            Setting::setValue('office_grace', (int)$data['office_grace']);
++        }
+ 
+         return $this->index();
+     }
+diff --git a/dashboard/resources/views/dashboard.blade.php b/dashboard/resources/views/dashboard.blade.php
+index f26a9b1..cdf49da 100644
+--- a/dashboard/resources/views/dashboard.blade.php
++++ b/dashboard/resources/views/dashboard.blade.php
+@@ -239,11 +239,12 @@
+                 <hr>
+                 <div class="mb-3">
+                     <label class="form-label fw-bold">Office Hours</label>
+-                    <div class="row g-2" style="max-width:280px;">
+-                        <div class="col-6"><label class="form-label small">Start</label><input type="time" id="office-start" class="form-control form-control-sm" value="09:30"></div>
+-                        <div class="col-6"><label class="form-label small">End</label><input type="time" id="office-end" class="form-control form-control-sm" value="17:00"></div>
++                    <div class="row g-2" style="max-width:360px;">
++                        <div class="col-4"><label class="form-label small">Start</label><input type="time" id="office-start" class="form-control form-control-sm" value="09:30"></div>
++                        <div class="col-4"><label class="form-label small">End</label><input type="time" id="office-end" class="form-control form-control-sm" value="17:00"></div>
++                        <div class="col-4"><label class="form-label small">Tolerance &plusmn; (min)</label><input type="number" id="office-grace" class="form-control form-control-sm" value="5" min="0" max="60"></div>
+                     </div>
+-                    <small class="text-muted">On time within &plusmn;5 min of Start (first punch only). Late &gt; +5, Early &lt; -5</small>
++                    <small class="text-muted">On time within &plusmn; tolerance of Start (first punch only). Late &gt; +tolerance, Early &lt; -tolerance</small>
+                 </div>
+                 <hr>
+                 <div class="mb-2">
+diff --git a/dashboard/resources/views/partials/scripts.blade.php b/dashboard/resources/views/partials/scripts.blade.php
+index f7c7ef4..8d8a42e 100644
+--- a/dashboard/resources/views/partials/scripts.blade.php
++++ b/dashboard/resources/views/partials/scripts.blade.php
+@@ -135,8 +135,9 @@ function updateFilters(type){
+     // copy/export only for daily
+     $('#copy-daily, #export-daily, #formatted-copy').toggleClass('d-none', type !== 'daily');
+ 
+-    // "Last Day Last Punch" column only makes sense on the daily view
++    // "Last Day Last Punch" and Flag only for daily (not monthly/user/dashboard)
+     try { if (typeof table !== 'undefined' && table && table.column) table.column(2).visible(type === 'daily'); } catch(e) {}
++    try { if (typeof table !== 'undefined' && table && table.column) table.column(6).visible(type === 'daily'); } catch(e) {}
+ 
+     // hide apply-filter for user page
+     $('#apply-filter').toggleClass('d-none', type === 'directory');
+@@ -175,8 +176,8 @@ function initColvis(){
+     if (!menu.length || !table) return;
+     const cols = [
+         { idx: 2, label: 'Last Day Punch' },
+-        { idx: 6, label: 'Type' },
+-        { idx: 7, label: 'VerifyID' }
++        { idx: 7, label: 'Type' },
++        { idx: 8, label: 'VerifyID' }
+     ];
+     menu.empty();
+     cols.forEach(c => {
+@@ -190,7 +191,7 @@ function showSkeleton(){
+     if (!tbody.length) return;
+     tbody.empty();
+     for(let i=0;i<5;i++){
+-        tbody.append(`<tr class="skeleton-row"><td><span class="skeleton" style="width:60%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:70%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:20%"></span></td></tr>`);
++        tbody.append(`<tr class="skeleton-row"><td><span class="skeleton" style="width:60%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:70%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:20%"></span></td></tr>`);
+     }
+ }
+ 
+@@ -979,6 +980,7 @@ function renderHolidayList() {
+                 renderHolidayList();
+                 $('#office-start').val(res.office_start || '09:30');
+                 $('#office-end').val(res.office_end || '17:00');
++                $('#office-grace').val(res.office_grace ?? 5);
+                 $('#settingsModal').modal('show');
+             }).fail(function(){
+                 showToast('Error', 'Failed to load settings');
+@@ -1003,11 +1005,12 @@ function renderHolidayList() {
+         const weekendDays = $('.weekend-day:checked').map(function(){ return Number($(this).val()); }).get();
+         const officeStart = $('#office-start').val() || '09:30';
+         const officeEnd = $('#office-end').val() || '17:00';
++        const officeGrace = parseInt($('#office-grace').val() || '5', 10) || 5;
+         $.ajax({
+             url: '/api/settings',
+             method: 'POST',
+             contentType: 'application/json',
+-            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays, office_start: officeStart, office_end: officeEnd })
++            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays, office_start: officeStart, office_end: officeEnd, office_grace: officeGrace })
+         }).done(function(){
+             $('#settingsModal').modal('hide');
+             showToast('Saved', 'Settings updated');
+-- 
+2.47.3
+

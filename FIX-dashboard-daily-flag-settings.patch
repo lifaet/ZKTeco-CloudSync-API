@@ -1,0 +1,354 @@
+From 5c90202eb30aba6348ebdacd1e64f7fabdf15f97 Mon Sep 17 00:00:00 2001
+From: ZKTeco <lifaet@zkteco.local>
+Date: Tue, 22 Sep 2026 07:58:47 +0000
+Subject: [PATCH] fix: dashboard vs daily split + flag +-5 single + settings
+ menu + hide analytics
+
+- Flag: single status from first punch only with +-5 min grace around office_start (on time within +-5, late >+5, early <-5, absent), no late_early dual, update AttendanceController and AnalyticsController lateTrend, frontend badge single, row-late only for late, settings modal text +-5
+- Dashboard vs Daily split: sidebar Dashboard (dashboard, speedometer) + Daily (daily, calendar) as separate, filter-type Dashboard/Daily, dashboardSection (summaryCards+dashboardCharts) vs attendanceSection (table), updateFilters shows date for dashboard+daily, prev/next for dashboard, hide copy/export/colvis/add for dashboard, show for daily, dashboardCharts only for dashboard (loadDashboardCharts checks dashboard), summary for dashboard via separate /api/attendance-summary fetch
+- Settings: separate sidebar Settings (gear) opens settingsModal (weekend/holidays/office hours), keep gear button also, remove analytics link (dashboard already has charts), attendance2/analytics sidebars updated to Dashboard+Daily
+- Default view dashboard (hash fallback dashboard, applyView excludes dashboard from table reload, initial currentType dashboard)
+---
+ .../Http/Controllers/AnalyticsController.php  | 10 ++-
+ .../Http/Controllers/AttendanceController.php | 21 +++--
+ dashboard/resources/views/analytics.blade.php |  2 +-
+ .../resources/views/attendance2.blade.php     |  2 +-
+ dashboard/resources/views/dashboard.blade.php | 18 ++--
+ .../views/partials/scripts.blade.php          | 85 ++++++++++++++-----
+ 6 files changed, 99 insertions(+), 39 deletions(-)
+
+diff --git a/dashboard/app/Http/Controllers/AnalyticsController.php b/dashboard/app/Http/Controllers/AnalyticsController.php
+index 5c1c50f..1c59146 100644
+--- a/dashboard/app/Http/Controllers/AnalyticsController.php
++++ b/dashboard/app/Http/Controllers/AnalyticsController.php
+@@ -77,7 +77,10 @@ public function data(Request $request)
+         }
+         usort($deptAvg, fn($a,$b) => $b['avg_sec'] <=> $a['avg_sec']);
+ 
+-        // 3. Late trend (last 30 days)
++        // 3. Late trend (last 30 days) - +-5 min grace on first punch only
++        $grace = 5;
++        [$oh, $om] = array_map('intval', explode(':', $officeStart));
++        $officeMin = $oh * 60 + $om;
+         $lateTrend = [];
+         $cursor = Carbon::today()->subDays(29);
+         for ($i=0; $i<30; $i++) {
+@@ -93,7 +96,10 @@ public function data(Request $request)
+                     $user = User::where('id', $uid)->first();
+                     if ($user && !$user->active) continue;
+                     $first = Carbon::parse($recs->first()->timestamp)->format('H:i');
+-                    if ($first > $officeStart) $late++;
++                    if (!preg_match('/^\d{2}:\d{2}/', $first)) continue;
++                    [$fh, $fm] = array_map('intval', explode(':', $first));
++                    $fpMin = $fh * 60 + $fm;
++                    if (($fpMin - $officeMin) > $grace) $late++;
+                 }
+                 $lateTrend[] = ['date' => $date, 'late' => $late];
+             }
+diff --git a/dashboard/app/Http/Controllers/AttendanceController.php b/dashboard/app/Http/Controllers/AttendanceController.php
+index a932445..1828aa8 100644
+--- a/dashboard/app/Http/Controllers/AttendanceController.php
++++ b/dashboard/app/Http/Controllers/AttendanceController.php
+@@ -138,22 +138,27 @@ public function data(Request $request)
+                 }
+             }
+ 
+-            // --- Tier 1: Late / Early flag (09:30 / 17:00, configurable via settings) ---
++            // --- Flag: single status from first_punch with +-5 min grace around office_start ---
+             $officeStart = Setting::getValue('office_start', '09:30');
+-            $officeEnd = Setting::getValue('office_end', '17:00');
++            $grace = 5; // minutes
++            [$oh, $om] = array_map('intval', explode(':', $officeStart));
++            $officeMin = $oh * 60 + $om;
+             foreach ($data as &$r) {
+                 $r['late_flag'] = false;
+                 $r['early_flag'] = false;
+                 $r['late_status'] = 'on_time';
+                 if (!$r['is_absent'] && $r['first_punch'] && $r['first_punch'] !== 'Absent') {
+                     $fp = substr($r['first_punch'], 0, 5);
+-                    if ($fp > $officeStart) { $r['late_flag'] = true; $r['late_status'] = 'late'; }
+-                }
+-                if (!$r['is_absent'] && $r['last_punch']) {
+-                    $lp = substr($r['last_punch'], 0, 5);
+-                    if ($lp !== '' && $lp < $officeEnd) { $r['early_flag'] = true; $r['late_status'] = $r['late_flag'] ? 'late_early' : 'early'; }
++                    if (preg_match('/^\d{2}:\d{2}/', $fp)) {
++                        [$fh, $fm] = array_map('intval', explode(':', $fp));
++                        $fpMin = $fh * 60 + $fm;
++                        $diff = $fpMin - $officeMin;
++                        if ($diff > $grace) { $r['late_flag'] = true; $r['late_status'] = 'late'; }
++                        elseif ($diff < -$grace) { $r['early_flag'] = true; $r['late_status'] = 'early'; }
++                        else { $r['late_status'] = 'on_time'; }
++                    }
+                 }
+-                if ($r['is_absent']) $r['late_status'] = 'absent';
++                if ($r['is_absent']) { $r['late_status'] = 'absent'; $r['late_flag'] = false; $r['early_flag'] = false; }
+             }
+             unset($r);
+ 
+diff --git a/dashboard/resources/views/analytics.blade.php b/dashboard/resources/views/analytics.blade.php
+index 13bc999..d3ead1c 100644
+--- a/dashboard/resources/views/analytics.blade.php
++++ b/dashboard/resources/views/analytics.blade.php
+@@ -26,10 +26,10 @@
+ 
+ <div class="sidebar" id="sidebar">
+     <a href="/"><i class="bi bi-speedometer2"></i> Dashboard</a>
++    <a href="/"><i class="bi bi-calendar-day"></i> Daily</a>
+     <a href="/" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="/" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="/" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
+-    <a href="/analytics" class="active"><i class="bi bi-graph-up"></i> Analytics</a>
+     @if(env('ATTENDANCE2_ENABLED'))
+     <a href="/attendance2" id="attendance2Link"><i class="bi bi-shield-lock"></i> Door Monitor</a>
+     @endif
+diff --git a/dashboard/resources/views/attendance2.blade.php b/dashboard/resources/views/attendance2.blade.php
+index ca0f80c..ac68ecd 100644
+--- a/dashboard/resources/views/attendance2.blade.php
++++ b/dashboard/resources/views/attendance2.blade.php
+@@ -28,10 +28,10 @@
+ 
+ <div class="sidebar" id="sidebar">
+     <a href="/"><i class="bi bi-speedometer2"></i> Dashboard</a>
++    <a href="/"><i class="bi bi-calendar-day"></i> Daily</a>
+     <a href="/"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="/"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="/"><i class="bi bi-people"></i> User Directory</a>
+-    <a href="/analytics"><i class="bi bi-graph-up"></i> Analytics</a>
+     <a href="/attendance2" class="active"><i class="bi bi-shield-lock"></i> Door Monitor <span id="doorLiveBadge2" class="badge bg-success ms-auto">0</span></a>
+     <hr>
+     <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
+diff --git a/dashboard/resources/views/dashboard.blade.php b/dashboard/resources/views/dashboard.blade.php
+index 2e2c441..f26a9b1 100644
+--- a/dashboard/resources/views/dashboard.blade.php
++++ b/dashboard/resources/views/dashboard.blade.php
+@@ -26,15 +26,16 @@
+ 
+ <!-- Sidebar Navigation -->
+ <div class="sidebar" id="sidebar">
+-    <a href="#" data-type="daily" class="active"><i class="bi bi-speedometer2"></i> Dashboard</a>
++    <a href="#" data-type="dashboard" class="active"><i class="bi bi-speedometer2"></i> Dashboard</a>
++    <a href="#" data-type="daily"><i class="bi bi-calendar-day"></i> Daily</a>
+     <a href="#" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="#" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="#" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
+-    <a href="/analytics" id="analyticsLink"><i class="bi bi-graph-up"></i> Analytics</a>
+     @if(env('ATTENDANCE2_ENABLED'))
+     <a href="/attendance2" id="attendance2Link"><i class="bi bi-shield-lock"></i> Door Monitor <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
+     @endif
+     <hr>
++    <a href="#" id="settingsMenuBtn"><i class="bi bi-gear"></i> Settings</a>
+     <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
+ </div>
+ 
+@@ -43,8 +44,9 @@
+     <div class="content-wrapper">
+     <div class="filters d-flex align-items-center gap-2 flex-nowrap" style="margin-bottom: 1rem; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch;">
+         <!-- Type selector — single pill -->
+-        <select id="filter-type" class="form-select form-select-sm" style="width:105px; min-width:105px;">
+-            <option value="daily">Dashboard</option>
++        <select id="filter-type" class="form-select form-select-sm" style="width:115px; min-width:115px;">
++            <option value="dashboard">Dashboard</option>
++            <option value="daily">Daily</option>
+             <option value="monthly">Monthly</option>
+             <option value="user">User</option>
+             <option value="directory">Directory</option>
+@@ -93,8 +95,8 @@
+         </div>
+     </div>
+ 
+-    <div id="attendanceSection">
+-    <!-- Tier 1: Work Hours Summary Cards (daily only) -->
++    <div id="dashboardSection">
++    <!-- Dashboard: summary + charts (present/absent/late + analytics) -->
+     <div id="summaryCards" class="row g-2 mb-3 d-none">
+         <div class="col-6 col-md-3">
+             <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
+@@ -150,6 +152,8 @@
+             </div>
+         </div>
+     </div>
++    </div>
++    <div id="attendanceSection">
+     <table id="attendanceTable" class="table table-striped table-bordered">
+         <thead>
+             <tr>
+@@ -239,7 +243,7 @@
+                         <div class="col-6"><label class="form-label small">Start</label><input type="time" id="office-start" class="form-control form-control-sm" value="09:30"></div>
+                         <div class="col-6"><label class="form-label small">End</label><input type="time" id="office-end" class="form-control form-control-sm" value="17:00"></div>
+                     </div>
+-                    <small class="text-muted">Late if first punch &gt; Start, Early if last punch &lt; End</small>
++                    <small class="text-muted">On time within &plusmn;5 min of Start (first punch only). Late &gt; +5, Early &lt; -5</small>
+                 </div>
+                 <hr>
+                 <div class="mb-2">
+diff --git a/dashboard/resources/views/partials/scripts.blade.php b/dashboard/resources/views/partials/scripts.blade.php
+index d35fbf3..f7c7ef4 100644
+--- a/dashboard/resources/views/partials/scripts.blade.php
++++ b/dashboard/resources/views/partials/scripts.blade.php
+@@ -1,6 +1,6 @@
+ <script>
+ let table;
+-let currentType = 'daily';
++let currentType = 'dashboard';
+ let lastCheckId = 0; // last known entry ID
+ // Polling interval (ms) for /api/check-latest. Lower values = more frequent checks.
+ // Be careful lowering too far: very frequent polling increases DB/load. Default 2000ms = 2s.
+@@ -78,14 +78,58 @@ function updateFilters(type){
+     $('#filter-type').val(type);
+ 
+     // show/hide inputs
+-    $('#filter-date').toggleClass('d-none', type !== 'daily');
++    const isDailyLike = (type === 'daily' || type === 'dashboard');
++    $('#filter-date').toggleClass('d-none', !isDailyLike);
+     $('#filter-month').toggleClass('d-none', type !== 'monthly');
+     $('#filter-user').toggleClass('d-none', type !== 'user');
+     $('#filter-user-select').toggleClass('d-none', type !== 'user');
+-    $('#filter-dept').toggleClass('d-none', type !== 'daily');
++    $('#filter-dept').toggleClass('d-none', type !== 'daily'); // dept only for log table
++    // dashboard vs daily: dashboard = charts+summary, daily = table+summary, others hide both
++    if (type === 'dashboard') {
++        $('#dashboardSection').removeClass('d-none');
++        $('#summaryCards').removeClass('d-none');
++        $('#dashboardCharts').removeClass('d-none');
++        $('#attendanceSection').addClass('d-none');
++        $('#userSection').addClass('d-none');
++        $('#copy-daily, #export-daily, #formatted-copy').addClass('d-none');
++        $('#addAttendanceBtn').addClass('d-none');
++        $('.colvis-dropdown').addClass('d-none');
++    } else if (type === 'daily') {
++        $('#dashboardSection').removeClass('d-none');
++        $('#summaryCards').removeClass('d-none');
++        $('#dashboardCharts').addClass('d-none');
++        $('#attendanceSection').removeClass('d-none');
++        $('#userSection').addClass('d-none');
++        // copy/export handled separately via drawCallback but ensure visible
++        $('#addAttendanceBtn').removeClass('d-none');
++        $('.colvis-dropdown').removeClass('d-none');
++    } else if (type === 'directory') {
++        $('#dashboardSection').addClass('d-none');
++        $('#attendanceSection').addClass('d-none');
++        $('#userSection').removeClass('d-none');
++    } else {
++        // monthly / user : table only, no dashboard
++        $('#dashboardSection').addClass('d-none');
++        $('#attendanceSection').removeClass('d-none');
++        $('#userSection').addClass('d-none');
++    }
++    if (type === 'dashboard') {
++        // fetch dashboard summary (present/absent/late/avg) for today
++        const dashDate = $('#filter-date').val() || new Date().toISOString().slice(0,10);
++        $.getJSON('/api/attendance-summary', { type: 'daily', date: dashDate, dept: '', draw: 1, start: 0, length: 1 }).done(function(j){
++            if (j && j.summary) {
++                $('#sumPresent').text(j.summary.present ?? '—');
++                $('#sumAbsent').text(j.summary.absent ?? '—');
++                $('#sumLate').text(j.summary.late ?? '—');
++                $('#sumAvg').text(j.summary.avg_work ?? '—');
++                $('#dashOffice').text('Office: ' + (j.summary.office_start||'09:30') + ' – ' + (j.summary.office_end||'17:00'));
++            }
++        });
++        if (typeof loadDashboardCharts === 'function') loadDashboardCharts();
++    }
+ 
+     // show prev/next controls only for relevant types
+-    $('.prev-day, .next-day').toggle(type === 'daily');
++    $('.prev-day, .next-day').toggle(type === 'daily' || type === 'dashboard');
+     $('.prev-month, .next-month').toggle(type === 'monthly');
+ 
+     // copy/export only for daily
+@@ -219,7 +263,7 @@ function refresh(){
+ 
+ let dashC1=null, dashC2=null, dashC3=null;
+ function loadDashboardCharts(){
+-    if (currentType !== 'daily') return;
++    if (currentType !== 'dashboard') return;
+     const dateVal = $('#filter-date').val() || new Date().toISOString().slice(0,10);
+     const month = dateVal.slice(0,7);
+     if (loadDashboardCharts._lastMonth === month && loadDashboardCharts._loading) return;
+@@ -428,7 +472,6 @@ function extractId(r){
+                 if (row.is_absent) return '<span class="badge bg-danger">Absent</span>';
+                 if (d === 'late') return '<span class="badge bg-warning text-dark">Late</span>';
+                 if (d === 'early') return '<span class="badge bg-info">Early</span>';
+-                if (d === 'late_early') return '<span class="badge bg-warning text-dark">Late</span> <span class="badge bg-info">Early</span>';
+                 return '<span class="badge bg-success">On Time</span>';
+             }},
+             { data: 'punch', render: function(d, type, row) {
+@@ -480,20 +523,15 @@ function extractId(r){
+                 // update empty date hint
+                 const d = $('#filter-date').val() || '';
+                 $('.js-empty-date').text(d);
+-                // Tier 1: summary cards + dashboard charts (daily = Dashboard)
++                // summary for daily table (dashboard summary is fetched separately)
+                 if (json && json.summary && currentType === 'daily') {
+                     $('#sumPresent').text(json.summary.present ?? '—');
+                     $('#sumAbsent').text(json.summary.absent ?? '—');
+                     $('#sumLate').text(json.summary.late ?? '—');
+                     $('#sumAvg').text(json.summary.avg_work ?? '—');
+-                    $('#summaryCards').removeClass('d-none');
+-                    $('#dashboardCharts').removeClass('d-none');
+-                    // lazy load dashboard charts once per draw
+-                    if (typeof loadDashboardCharts === 'function') loadDashboardCharts();
+-                } else {
+-                    $('#summaryCards').addClass('d-none');
+-                    $('#dashboardCharts').addClass('d-none');
++                    // keep summary visible (dashboardSection handles visibility)
+                 }
++                // dashboard charts are handled via loadDashboardCharts for dashboard type, not here
+             } catch(e){}
+         },
+         preDrawCallback: function(settings){
+@@ -579,21 +617,27 @@ function extractId(r){
+     // initialize filter UI for current view via URL hash (deep-linking)
+     // Supported hashes: #daily (default), #monthly, #user, #directory
+     function applyView(view) {
+-        const selected = view || 'daily';
++        const selected = view || 'dashboard';
+         currentType = selected;
+         $('.sidebar a').removeClass('active');
+         // mark matching sidebar item active
+         $('.sidebar a').each(function(){ if ($(this).data('type') === selected) $(this).addClass('active'); });
+-        // show/hide main sections
++        // show/hide main sections - dashboard vs daily vs others
+         if (selected === 'directory') {
++            $('#dashboardSection').addClass('d-none');
+             $('#attendanceSection').addClass('d-none');
+             $('#userSection').removeClass('d-none');
++        } else if (selected === 'dashboard') {
++            // handled in updateFilters, but ensure correct here too
++            $('#userSection').addClass('d-none');
++            // dashboardSection visibility handled in updateFilters
+         } else {
+             $('#userSection').addClass('d-none');
+-            $('#attendanceSection').removeClass('d-none');
++            // attendanceSection visibility handled in updateFilters
+         }
+         updateFilters(selected);
+-        if (selected !== 'directory' && table && table.ajax && typeof table.ajax.reload === 'function') {
++        // reload table only for table views, not dashboard/directory
++        if (selected !== 'directory' && selected !== 'dashboard' && table && table.ajax && typeof table.ajax.reload === 'function') {
+             table.ajax.reload();
+             // Delay adjust so DOM reflow/animations complete before recalculating widths
+             setTimeout(function(){
+@@ -602,10 +646,10 @@ function applyView(view) {
+         }
+     }
+ 
+-    // set view from current hash (strip leading '#')
++    // set view from current hash (strip leading '#') - default dashboard (first menu)
+     function setViewFromHash() {
+         const hash = (window.location.hash || '').replace(/^#/, '');
+-        applyView(hash || 'daily');
++        applyView(hash || 'dashboard');
+     }
+ 
+     // clicking sidebar items updates the URL hash — hashchange handles the actual view change
+@@ -923,6 +967,7 @@ function renderHolidayList() {
+         });
+     }
+ 
++    $('#settingsMenuBtn').click(function(e){ e.preventDefault(); $('#settingsModal').modal('show'); });
+     $('#settingsBtn').click(function(){
+         $.ajax({ url: '/api/settings', method: 'GET', dataType: 'json', cache: false })
+             .done(function(res){
+-- 
+2.47.3
+

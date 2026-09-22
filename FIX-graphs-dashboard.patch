@@ -1,0 +1,277 @@
+From 7598a614034ae34ddb781a035f6ce53085218bfb Mon Sep 17 00:00:00 2001
+From: ZKTeco <lifaet@zkteco.local>
+Date: Tue, 22 Sep 2026 07:50:52 +0000
+Subject: [PATCH] fix: graphs capped/future-null + dashboard first menu
+ combined
+
+- AnalyticsController: daily_present future dates -> null (was 0) and pct capped at 100, prevents 0% future weekdays flattening line and >90% clipping
+- analytics.blade: canvas height 280px + maintainAspectRatio false, line spanGaps false (was true) + fill 0.12, pointRadius 3, interaction index, y 0-100 step10, x grid, tooltip present/total; dept bar borderRadius + y grid false; late bar skipNull + x rotation + y grid; fixes broken top chart (was height 80, responsive clip)
+- dashboard.blade: first sidebar Daily -> Dashboard (speedometer2), filter-type Daily -> Dashboard, add #dashboardCharts 3 cards (present% 220px + dept 260px + late 260px) + Chart.js 4.4 UMD, shared glass
+- partials/scripts: drawCallback shows #dashboardCharts for daily + loadDashboardCharts() on draw (month from filter-date), dashC1/2/3 with same fixed options as analytics, lazy month cache, handles present/total tooltip
+- attendance2/analytics sidebars: first link Daily -> Dashboard for seamless
+---
+ .../Http/Controllers/AnalyticsController.php  | 15 +++---
+ dashboard/resources/views/analytics.blade.php | 26 +++++-----
+ .../resources/views/attendance2.blade.php     |  2 +-
+ dashboard/resources/views/dashboard.blade.php | 26 +++++++++-
+ .../views/partials/scripts.blade.php          | 49 ++++++++++++++++++-
+ 5 files changed, 95 insertions(+), 23 deletions(-)
+
+diff --git a/dashboard/app/Http/Controllers/AnalyticsController.php b/dashboard/app/Http/Controllers/AnalyticsController.php
+index 5768148..5c1c50f 100644
+--- a/dashboard/app/Http/Controllers/AnalyticsController.php
++++ b/dashboard/app/Http/Controllers/AnalyticsController.php
+@@ -33,17 +33,20 @@ public function data(Request $request)
+         $start = Carbon::parse($month . '-01');
+         $end = $start->copy()->endOfMonth();
+         $activeCount = User::where('active', true)->count();
++        $todayStr = Carbon::today()->toDateString();
+         $dailyPresent = [];
+         $cursor = $start->copy();
+         while ($cursor->lte($end)) {
++            $dateStr = $cursor->toDateString();
+             $isWeekend = in_array($cursor->dayOfWeek, $weekendDays);
+-            $isHoliday = in_array($cursor->toDateString(), $holidays);
+-            if ($isWeekend || $isHoliday) {
+-                $dailyPresent[] = ['date' => $cursor->toDateString(), 'pct' => null];
++            $isHoliday = in_array($dateStr, $holidays);
++            $isFuture = $dateStr > $todayStr;
++            if ($isWeekend || $isHoliday || $isFuture) {
++                $dailyPresent[] = ['date' => $dateStr, 'pct' => null];
+             } else {
+-                $present = DB::table('attendances')->whereDate('timestamp', $cursor->toDateString())->select('user_id')->distinct()->count();
+-                $pct = $activeCount ? round($present / $activeCount * 100, 1) : 0;
+-                $dailyPresent[] = ['date' => $cursor->toDateString(), 'pct' => $pct, 'present' => $present, 'total' => $activeCount];
++                $present = DB::table('attendances')->whereDate('timestamp', $dateStr)->select('user_id')->distinct()->count();
++                $pct = $activeCount ? round(min(100, $present / $activeCount * 100), 1) : 0;
++                $dailyPresent[] = ['date' => $dateStr, 'pct' => $pct, 'present' => $present, 'total' => $activeCount];
+             }
+             $cursor->addDay();
+         }
+diff --git a/dashboard/resources/views/analytics.blade.php b/dashboard/resources/views/analytics.blade.php
+index 9e50099..13bc999 100644
+--- a/dashboard/resources/views/analytics.blade.php
++++ b/dashboard/resources/views/analytics.blade.php
+@@ -25,7 +25,7 @@
+ </nav>
+ 
+ <div class="sidebar" id="sidebar">
+-    <a href="/" data-type="daily"><i class="bi bi-calendar-day"></i> Daily</a>
++    <a href="/"><i class="bi bi-speedometer2"></i> Dashboard</a>
+     <a href="/" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="/" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="/" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
+@@ -52,19 +52,19 @@
+             <div class="col-12">
+                 <div class="card chart-card">
+                     <div class="card-header d-flex align-items-center gap-2"><i class="bi bi-bar-chart"></i> Daily Attendance % (this month) <span class="ms-auto small text-muted" id="ana-office"></span></div>
+-                    <div class="card-body"><canvas id="chartPresent" height="80"></canvas></div>
++                    <div class="card-body" style="height:280px;"><canvas id="chartPresent"></canvas></div>
+                 </div>
+             </div>
+             <div class="col-12 col-lg-6">
+                 <div class="card chart-card">
+                     <div class="card-header"><i class="bi bi-people"></i> Department Avg Work Hours (this month)</div>
+-                    <div class="card-body"><canvas id="chartDept" height="120"></canvas></div>
++                    <div class="card-body" style="height:280px;"><canvas id="chartDept"></canvas></div>
+                 </div>
+             </div>
+             <div class="col-12 col-lg-6">
+                 <div class="card chart-card">
+                     <div class="card-header"><i class="bi bi-clock-history"></i> Late Arrivals — Last 30 Days</div>
+-                    <div class="card-body"><canvas id="chartLate" height="120"></canvas></div>
++                    <div class="card-body" style="height:280px;"><canvas id="chartLate"></canvas></div>
+                 </div>
+             </div>
+         </div>
+@@ -96,32 +96,32 @@ function load(){
+         const month = $('#ana-month').val();
+         $.getJSON('/api/analytics', { month }, function(res){
+             $('#ana-office').text('Office: ' + (res.office_start||'09:30') + ' – ' + (res.office_end||'17:00'));
+-            // chart 1: daily present %
++            // chart 1: daily present % - fixed: future nulls, no spanGaps, capped 100, maintainAspectRatio false
+             const labels1 = res.daily_present.map(x => x.date.slice(8));
+             const data1 = res.daily_present.map(x => x.pct);
+             if(c1) c1.destroy();
+             c1 = new Chart(document.getElementById('chartPresent'), {
+                 type: 'line',
+-                data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.1)', fill: true, tension: 0.3, spanGaps: true }] },
+-                options: { responsive: true, scales: { y: { min:0, max:100, ticks: { callback: v => v+'%' } } }, plugins: { legend: { display: false } } }
++                data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.12)', fill: true, tension: 0.35, spanGaps: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, spanGaps: false }] },
++                options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, scales: { x: { grid: { display: true, color: 'rgba(100,116,139,0.08)' } }, y: { min:0, max:100, ticks: { stepSize: 10, callback: v => v+'%' }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'No data' : ctx.parsed.y+'% (' + (res.daily_present[ctx.dataIndex].present||0) + '/' + (res.daily_present[ctx.dataIndex].total||0) + ')' } } } }
+             });
+-            // chart 2: dept avg hours
++            // chart 2: dept avg hours - fixed maintainAspectRatio
+             const deptLabels = res.dept_avg.map(x => x.dept);
+             const deptHours = res.dept_avg.map(x => (x.avg_sec/3600).toFixed(2));
+             if(c2) c2.destroy();
+             c2 = new Chart(document.getElementById('chartDept'), {
+                 type: 'bar',
+-                data: { labels: deptLabels, datasets: [{ label: 'Avg Hours', data: deptHours, backgroundColor: 'rgba(2,132,199,0.6)', borderColor: '#0284c7', borderWidth: 1 }]},
+-                options: { indexAxis: 'y', responsive: true, scales: { x: { min:0, max:12, title: { display:true, text:'Hours' } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.raw + ' h (' + res.dept_avg[ctx.dataIndex].avg_hours + ')' } } } }
++                data: { labels: deptLabels, datasets: [{ label: 'Avg Hours', data: deptHours, backgroundColor: 'rgba(2,132,199,0.65)', borderColor: '#0284c7', borderWidth: 1, borderRadius: 4 }]},
++                options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, scales: { x: { min:0, max:12, title: { display:true, text:'Hours' }, grid: { color: 'rgba(100,116,139,0.08)' } }, y: { grid: { display: false } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.raw + ' h (' + res.dept_avg[ctx.dataIndex].avg_hours + ')' } } } }
+             });
+-            // chart 3: late trend
++            // chart 3: late trend - fixed maintainAspectRatio + gaps for weekends/holidays
+             const lateLabels = res.late_trend.map(x => x.date.slice(5));
+             const lateData = res.late_trend.map(x => x.late);
+             if(c3) c3.destroy();
+             c3 = new Chart(document.getElementById('chartLate'), {
+                 type: 'bar',
+-                data: { labels: lateLabels, datasets: [{ label: 'Late', data: lateData, backgroundColor: 'rgba(234,179,8,0.7)', borderColor: '#a16207', borderWidth: 1 }]},
+-                options: { responsive: true, scales: { y: { beginAtZero:true, ticks:{ stepSize:1 } } }, plugins: { legend: { display:false } } }
++                data: { labels: lateLabels, datasets: [{ label: 'Late', data: lateData, backgroundColor: 'rgba(234,179,8,0.75)', borderColor: '#a16207', borderWidth: 1, borderRadius: 3, skipNull: true }]},
++                options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false }, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 15 } }, y: { beginAtZero:true, ticks:{ stepSize:1, precision:0 }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'Weekend/Holiday' : ctx.parsed.y + ' late' } } } }
+             });
+         }).fail(function(xhr){ console.error(xhr); });
+     }
+diff --git a/dashboard/resources/views/attendance2.blade.php b/dashboard/resources/views/attendance2.blade.php
+index af95d8b..ca0f80c 100644
+--- a/dashboard/resources/views/attendance2.blade.php
++++ b/dashboard/resources/views/attendance2.blade.php
+@@ -27,7 +27,7 @@
+ </nav>
+ 
+ <div class="sidebar" id="sidebar">
+-    <a href="/"><i class="bi bi-calendar-day"></i> Daily</a>
++    <a href="/"><i class="bi bi-speedometer2"></i> Dashboard</a>
+     <a href="/"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="/"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="/"><i class="bi bi-people"></i> User Directory</a>
+diff --git a/dashboard/resources/views/dashboard.blade.php b/dashboard/resources/views/dashboard.blade.php
+index 93b6299..2e2c441 100644
+--- a/dashboard/resources/views/dashboard.blade.php
++++ b/dashboard/resources/views/dashboard.blade.php
+@@ -26,7 +26,7 @@
+ 
+ <!-- Sidebar Navigation -->
+ <div class="sidebar" id="sidebar">
+-    <a href="#" data-type="daily" class="active"><i class="bi bi-calendar-day"></i> Daily</a>
++    <a href="#" data-type="daily" class="active"><i class="bi bi-speedometer2"></i> Dashboard</a>
+     <a href="#" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="#" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="#" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
+@@ -44,7 +44,7 @@
+     <div class="filters d-flex align-items-center gap-2 flex-nowrap" style="margin-bottom: 1rem; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch;">
+         <!-- Type selector — single pill -->
+         <select id="filter-type" class="form-select form-select-sm" style="width:105px; min-width:105px;">
+-            <option value="daily">Daily</option>
++            <option value="daily">Dashboard</option>
+             <option value="monthly">Monthly</option>
+             <option value="user">User</option>
+             <option value="directory">Directory</option>
+@@ -129,6 +129,27 @@
+             </div>
+         </div>
+     </div>
++    <!-- Dashboard charts (daily only) - combines analytics -->
++    <div id="dashboardCharts" class="row g-3 mb-3 d-none">
++        <div class="col-12">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
++                <div class="card-header d-flex align-items-center gap-2" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-bar-chart"></i> Daily Attendance % (this month) <span class="ms-auto small text-muted" id="dashOffice"></span></div>
++                <div class="card-body" style="height:220px;"><canvas id="dashChartPresent"></canvas></div>
++            </div>
++        </div>
++        <div class="col-12 col-lg-6">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
++                <div class="card-header" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-people"></i> Dept Avg Work Hours</div>
++                <div class="card-body" style="height:260px;"><canvas id="dashChartDept"></canvas></div>
++            </div>
++        </div>
++        <div class="col-12 col-lg-6">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border-radius:12px;">
++                <div class="card-header" style="background: rgba(255,255,255,0.6); font-weight:600;"><i class="bi bi-clock-history"></i> Late Arrivals — Last 30 Days</div>
++                <div class="card-body" style="height:260px;"><canvas id="dashChartLate"></canvas></div>
++            </div>
++        </div>
++    </div>
+     <table id="attendanceTable" class="table table-striped table-bordered">
+         <thead>
+             <tr>
+@@ -411,6 +432,7 @@
+ <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+ <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+ @include('partials.scripts')
+ 
+ </body>
+diff --git a/dashboard/resources/views/partials/scripts.blade.php b/dashboard/resources/views/partials/scripts.blade.php
+index b7bc950..d35fbf3 100644
+--- a/dashboard/resources/views/partials/scripts.blade.php
++++ b/dashboard/resources/views/partials/scripts.blade.php
+@@ -217,6 +217,49 @@ function refresh(){
+ 
+ 
+ 
++let dashC1=null, dashC2=null, dashC3=null;
++function loadDashboardCharts(){
++    if (currentType !== 'daily') return;
++    const dateVal = $('#filter-date').val() || new Date().toISOString().slice(0,10);
++    const month = dateVal.slice(0,7);
++    if (loadDashboardCharts._lastMonth === month && loadDashboardCharts._loading) return;
++    loadDashboardCharts._lastMonth = month;
++    loadDashboardCharts._loading = true;
++    $.getJSON('/api/analytics', { month }, function(res){
++        loadDashboardCharts._loading = false;
++        $('#dashOffice').text('Office: ' + (res.office_start||'09:30') + ' – ' + (res.office_end||'17:00'));
++        // present %
++        const labels1 = res.daily_present.map(x => x.date.slice(8));
++        const data1 = res.daily_present.map(x => x.pct);
++        if(dashC1) try{ dashC1.destroy(); }catch(e){}
++        const c1el = document.getElementById('dashChartPresent');
++        if(c1el) dashC1 = new Chart(c1el, {
++            type: 'line',
++            data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.12)', fill: true, tension: 0.35, spanGaps: false, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 }] },
++            options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, scales: { x: { grid: { color: 'rgba(100,116,139,0.08)' } }, y: { min:0, max:100, ticks: { stepSize: 10, callback: v => v+'%' }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'No data' : ctx.parsed.y+'% (' + (res.daily_present[ctx.dataIndex].present||0) + '/' + (res.daily_present[ctx.dataIndex].total||0) + ')' } } } }
++        });
++        // dept avg
++        const deptLabels = res.dept_avg.map(x => x.dept);
++        const deptHours = res.dept_avg.map(x => (x.avg_sec/3600).toFixed(2));
++        if(dashC2) try{ dashC2.destroy(); }catch(e){}
++        const c2el = document.getElementById('dashChartDept');
++        if(c2el) dashC2 = new Chart(c2el, {
++            type: 'bar',
++            data: { labels: deptLabels, datasets: [{ label: 'Avg Hours', data: deptHours, backgroundColor: 'rgba(2,132,199,0.65)', borderColor: '#0284c7', borderWidth: 1, borderRadius: 4 }]},
++            options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, scales: { x: { min:0, max:12, title: { display:true, text:'Hours' }, grid: { color: 'rgba(100,116,139,0.08)' } }, y: { grid: { display: false } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.raw + ' h (' + res.dept_avg[ctx.dataIndex].avg_hours + ')' } } } }
++        });
++        // late
++        const lateLabels = res.late_trend.map(x => x.date.slice(5));
++        const lateData = res.late_trend.map(x => x.late);
++        if(dashC3) try{ dashC3.destroy(); }catch(e){}
++        const c3el = document.getElementById('dashChartLate');
++        if(c3el) dashC3 = new Chart(c3el, {
++            type: 'bar',
++            data: { labels: lateLabels, datasets: [{ label: 'Late', data: lateData, backgroundColor: 'rgba(234,179,8,0.75)', borderColor: '#a16207', borderWidth: 1, borderRadius: 3, skipNull: true }]},
++            options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false }, ticks: { maxRotation: 45, minRotation: 45, autoSkip: true, maxTicksLimit: 15 } }, y: { beginAtZero:true, ticks:{ stepSize:1, precision:0 }, grid: { color: 'rgba(100,116,139,0.08)' } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y==null ? 'Weekend/Holiday' : ctx.parsed.y + ' late' } } } }
++        });
++    }).fail(function(){ loadDashboardCharts._loading = false; });
++}
+ function showToast(title, message){
+     const isError = /error|fail|invalid/i.test(title);
+     const toastId = 'toast-' + Date.now();
+@@ -437,15 +480,19 @@ function extractId(r){
+                 // update empty date hint
+                 const d = $('#filter-date').val() || '';
+                 $('.js-empty-date').text(d);
+-                // Tier 1: summary cards
++                // Tier 1: summary cards + dashboard charts (daily = Dashboard)
+                 if (json && json.summary && currentType === 'daily') {
+                     $('#sumPresent').text(json.summary.present ?? '—');
+                     $('#sumAbsent').text(json.summary.absent ?? '—');
+                     $('#sumLate').text(json.summary.late ?? '—');
+                     $('#sumAvg').text(json.summary.avg_work ?? '—');
+                     $('#summaryCards').removeClass('d-none');
++                    $('#dashboardCharts').removeClass('d-none');
++                    // lazy load dashboard charts once per draw
++                    if (typeof loadDashboardCharts === 'function') loadDashboardCharts();
+                 } else {
+                     $('#summaryCards').addClass('d-none');
++                    $('#dashboardCharts').addClass('d-none');
+                 }
+             } catch(e){}
+         },
+-- 
+2.47.3
+

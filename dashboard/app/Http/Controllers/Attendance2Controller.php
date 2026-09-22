@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Attendance2;
+use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class Attendance2Controller extends Controller
 {
@@ -47,9 +49,13 @@ class Attendance2Controller extends Controller
                       ->take($length)
                       ->get()
                       ->map(function($record) {
+                          $user = User::where('id', $record->user_id)->first();
                           return [
                               'id' => $record->id,
                               'user_id' => $record->user_id,
+                              'name' => $user ? $user->name : '',
+                              'title' => $user ? $user->title : '',
+                              'department' => $user ? $user->department : '',
                               'timestamp' => Carbon::parse($record->timestamp)->format('Y-m-d H:i:s'),
                               'status' => $record->status ?? '',
                               'punch' => $record->punch ?? '',
@@ -62,6 +68,26 @@ class Attendance2Controller extends Controller
             'recordsFiltered' => $recordsFiltered,
             'data' => $data,
         ]);
+    }
+
+    public function summary(Request $request)
+    {
+        if (! session('dashboard_logged_in')) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+        $today = Carbon::today()->toDateString();
+        $countToday = Attendance2::whereDate('timestamp', $today)->count();
+        $lastFive = Attendance2::orderBy('timestamp', 'desc')->take(5)->get()->map(function($r){
+            $user = User::where('id', $r->user_id)->first();
+            return [
+                'id' => $r->id,
+                'user_id' => $r->user_id,
+                'name' => $user ? $user->name : '',
+                'timestamp' => Carbon::parse($r->timestamp)->format('Y-m-d H:i:s'),
+                'time' => Carbon::parse($r->timestamp)->format('H:i:s'),
+            ];
+        });
+        return response()->json(['count' => $countToday, 'recordsTotal' => $countToday, 'last_five' => $lastFive]);
     }
 
     public function latest(Request $request)

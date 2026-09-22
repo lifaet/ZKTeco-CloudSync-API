@@ -1,0 +1,1333 @@
+From 464ead4c6aff502bf9ea3fb0d2b39a2cd9909cd3 Mon Sep 17 00:00:00 2001
+From: ZKTeco <lifaet@zkteco.local>
+Date: Tue, 22 Sep 2026 07:24:15 +0000
+Subject: [PATCH] feat: Tier1 (dept daily + late/early + summary cards + door
+ live pulse) + Tier3 analytics + seamless glass
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Dept daily: server-side dept param in AttendanceController@data (daily), frontend sends d.dept, toggle dept filter for daily, distinct from userDirectory
+- Late/Early Flag: office_start 09:30 / office_end 17:00 via Setting (getValue/setValue), compute late_flag/early_flag/late_status per row, Flag column badge (Late/Early/On Time/Absent), row-late highlight, late count in summary
+- Work Hours Summary Card: present/absent/late/avg_work before paginate, glass cards above table (daily only), drawCallback updates from json.summary, office hours in settings modal
+- Door Monitor Live Pulse: Attendance2Controller@data includes name/title/dept + new summary() for /api/door-pulse (count today + last 5), attendance2.blade rewritten to share navbar-header/sidebar/content-wrapper glass, live dot + total today + last 5 unlocks poll 5s, toast on new punch
+- Analytics Dashboard: new AnalyticsController (/analytics page + /api/analytics) with Chart.js — daily present % (month), dept avg hours, late trend 30d; office times in header
+- Seamless integration: dashboard + attendance2 + analytics share same header/sidebar/layout, navigation highlight, colvis + glass styles, door badge uses door-pulse (fallback to attendance2-summary)
+- Routes: /analytics + /api/analytics + /api/door-pulse, ATTENDANCE2_ENABLED guard kept
+---
+ .../Http/Controllers/AnalyticsController.php  | 109 ++++
+ .../Controllers/Attendance2Controller.php     |  26 +
+ .../Http/Controllers/AttendanceController.php |  47 ++
+ .../Http/Controllers/SettingController.php    |  10 +
+ dashboard/resources/views/analytics.blade.php | 134 ++++
+ .../resources/views/attendance2.blade.php     | 599 ++++++------------
+ dashboard/resources/views/dashboard.blade.php |  48 +-
+ .../views/partials/scripts.blade.php          |  61 +-
+ .../resources/views/partials/styles.blade.php |  12 +-
+ dashboard/routes/web.php                      |   4 +
+ 10 files changed, 606 insertions(+), 444 deletions(-)
+ create mode 100644 dashboard/app/Http/Controllers/AnalyticsController.php
+ create mode 100644 dashboard/resources/views/analytics.blade.php
+
+diff --git a/dashboard/app/Http/Controllers/AnalyticsController.php b/dashboard/app/Http/Controllers/AnalyticsController.php
+new file mode 100644
+index 0000000..5768148
+--- /dev/null
++++ b/dashboard/app/Http/Controllers/AnalyticsController.php
+@@ -0,0 +1,109 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use Illuminate\Http\Request;
++use App\Models\Attendance;
++use App\Models\User;
++use App\Models\Setting;
++use Carbon\Carbon;
++use Illuminate\Support\Facades\DB;
++
++class AnalyticsController extends Controller
++{
++    public function index()
++    {
++        if (! session('dashboard_logged_in')) {
++            return redirect('/login');
++        }
++        return view('analytics');
++    }
++
++    public function data(Request $request)
++    {
++        if (! session('dashboard_logged_in')) {
++            return response()->json(['error' => 'Unauthorized'], 401);
++        }
++
++        $month = $request->query('month', Carbon::now()->format('Y-m'));
++
++        // 1. Monthly present % (per day in month)
++        $weekendDays = Setting::getValue('weekend_days', [5, 6]);
++        $holidays = Setting::getValue('holidays', []);
++        $start = Carbon::parse($month . '-01');
++        $end = $start->copy()->endOfMonth();
++        $activeCount = User::where('active', true)->count();
++        $dailyPresent = [];
++        $cursor = $start->copy();
++        while ($cursor->lte($end)) {
++            $isWeekend = in_array($cursor->dayOfWeek, $weekendDays);
++            $isHoliday = in_array($cursor->toDateString(), $holidays);
++            if ($isWeekend || $isHoliday) {
++                $dailyPresent[] = ['date' => $cursor->toDateString(), 'pct' => null];
++            } else {
++                $present = DB::table('attendances')->whereDate('timestamp', $cursor->toDateString())->select('user_id')->distinct()->count();
++                $pct = $activeCount ? round($present / $activeCount * 100, 1) : 0;
++                $dailyPresent[] = ['date' => $cursor->toDateString(), 'pct' => $pct, 'present' => $present, 'total' => $activeCount];
++            }
++            $cursor->addDay();
++        }
++
++        // 2. Dept avg hours (for selected month)
++        $officeStart = Setting::getValue('office_start', '09:30');
++        $officeEnd = Setting::getValue('office_end', '17:00');
++        $deptHours = DB::table('attendances')
++            ->whereRaw("DATE_FORMAT(timestamp, '%Y-%m') = ?", [$month])
++            ->selectRaw("user_id, DATE(timestamp) as d, MIN(timestamp) as f, MAX(timestamp) as l, TIMESTAMPDIFF(SECOND, MIN(timestamp), MAX(timestamp)) as sec")
++            ->groupBy('user_id', DB::raw('DATE(timestamp)'))
++            ->havingRaw("COUNT(*) > 1")
++            ->get();
++        $deptMap = [];
++        foreach ($deptHours as $r) {
++            $user = User::find($r->user_id);
++            $dept = $user ? ($user->department ?: 'Unknown') : 'Unknown';
++            if (!isset($deptMap[$dept])) $deptMap[$dept] = ['total' => 0, 'count' => 0];
++            $deptMap[$dept]['total'] += $r->sec;
++            $deptMap[$dept]['count'] += 1;
++        }
++        $deptAvg = [];
++        foreach ($deptMap as $dept => $v) {
++            $avgSec = $v['count'] ? intdiv($v['total'], $v['count']) : 0;
++            $h = intdiv($avgSec, 3600);
++            $m = intdiv($avgSec % 3600, 60);
++            $deptAvg[] = ['dept' => $dept, 'avg_hours' => sprintf('%02d:%02d', $h, $m), 'avg_sec' => $avgSec, 'count' => $v['count']];
++        }
++        usort($deptAvg, fn($a,$b) => $b['avg_sec'] <=> $a['avg_sec']);
++
++        // 3. Late trend (last 30 days)
++        $lateTrend = [];
++        $cursor = Carbon::today()->subDays(29);
++        for ($i=0; $i<30; $i++) {
++            $date = $cursor->toDateString();
++            $isWeekend = in_array($cursor->dayOfWeek, $weekendDays);
++            $isHoliday = in_array($date, $holidays);
++            if ($isWeekend || $isHoliday) {
++                $lateTrend[] = ['date' => $date, 'late' => null];
++            } else {
++                $rows = Attendance::whereDate('timestamp', $date)->orderBy('timestamp')->get()->groupBy('user_id');
++                $late = 0;
++                foreach ($rows as $uid => $recs) {
++                    $user = User::where('id', $uid)->first();
++                    if ($user && !$user->active) continue;
++                    $first = Carbon::parse($recs->first()->timestamp)->format('H:i');
++                    if ($first > $officeStart) $late++;
++                }
++                $lateTrend[] = ['date' => $date, 'late' => $late];
++            }
++            $cursor->addDay();
++        }
++
++        return response()->json([
++            'month' => $month,
++            'daily_present' => $dailyPresent,
++            'dept_avg' => $deptAvg,
++            'late_trend' => $lateTrend,
++            'office_start' => $officeStart,
++            'office_end' => $officeEnd,
++        ]);
++    }
++}
+diff --git a/dashboard/app/Http/Controllers/Attendance2Controller.php b/dashboard/app/Http/Controllers/Attendance2Controller.php
+index 18524d9..e28d10f 100644
+--- a/dashboard/app/Http/Controllers/Attendance2Controller.php
++++ b/dashboard/app/Http/Controllers/Attendance2Controller.php
+@@ -4,7 +4,9 @@
+ 
+ use Illuminate\Http\Request;
+ use App\Models\Attendance2;
++use App\Models\User;
+ use Carbon\Carbon;
++use Illuminate\Support\Facades\DB;
+ 
+ class Attendance2Controller extends Controller
+ {
+@@ -47,9 +49,13 @@ public function data(Request $request)
+                       ->take($length)
+                       ->get()
+                       ->map(function($record) {
++                          $user = User::where('id', $record->user_id)->first();
+                           return [
+                               'id' => $record->id,
+                               'user_id' => $record->user_id,
++                              'name' => $user ? $user->name : '',
++                              'title' => $user ? $user->title : '',
++                              'department' => $user ? $user->department : '',
+                               'timestamp' => Carbon::parse($record->timestamp)->format('Y-m-d H:i:s'),
+                               'status' => $record->status ?? '',
+                               'punch' => $record->punch ?? '',
+@@ -64,6 +70,26 @@ public function data(Request $request)
+         ]);
+     }
+ 
++    public function summary(Request $request)
++    {
++        if (! session('dashboard_logged_in')) {
++            return response()->json(['error' => 'Unauthorized'], 401);
++        }
++        $today = Carbon::today()->toDateString();
++        $countToday = Attendance2::whereDate('timestamp', $today)->count();
++        $lastFive = Attendance2::orderBy('timestamp', 'desc')->take(5)->get()->map(function($r){
++            $user = User::where('id', $r->user_id)->first();
++            return [
++                'id' => $r->id,
++                'user_id' => $r->user_id,
++                'name' => $user ? $user->name : '',
++                'timestamp' => Carbon::parse($r->timestamp)->format('Y-m-d H:i:s'),
++                'time' => Carbon::parse($r->timestamp)->format('H:i:s'),
++            ];
++        });
++        return response()->json(['count' => $countToday, 'recordsTotal' => $countToday, 'last_five' => $lastFive]);
++    }
++
+     public function latest(Request $request)
+     {
+         $lastId = (int) $request->get('last_id', 0);
+diff --git a/dashboard/app/Http/Controllers/AttendanceController.php b/dashboard/app/Http/Controllers/AttendanceController.php
+index 5da13fc..a932445 100644
+--- a/dashboard/app/Http/Controllers/AttendanceController.php
++++ b/dashboard/app/Http/Controllers/AttendanceController.php
+@@ -127,6 +127,36 @@ public function data(Request $request)
+                 }
+             }
+ 
++            // --- Tier 1: Department filter (server-side) ---
++            if ($dept = $request->query('dept', $request->input('dept'))) {
++                $deptLower = strtolower(trim($dept));
++                if ($deptLower !== '' && $deptLower !== 'all') {
++                    $data = array_filter($data, function($row) use ($deptLower) {
++                        return strtolower($row['department'] ?? '') === $deptLower;
++                    });
++                    $data = array_values($data);
++                }
++            }
++
++            // --- Tier 1: Late / Early flag (09:30 / 17:00, configurable via settings) ---
++            $officeStart = Setting::getValue('office_start', '09:30');
++            $officeEnd = Setting::getValue('office_end', '17:00');
++            foreach ($data as &$r) {
++                $r['late_flag'] = false;
++                $r['early_flag'] = false;
++                $r['late_status'] = 'on_time';
++                if (!$r['is_absent'] && $r['first_punch'] && $r['first_punch'] !== 'Absent') {
++                    $fp = substr($r['first_punch'], 0, 5);
++                    if ($fp > $officeStart) { $r['late_flag'] = true; $r['late_status'] = 'late'; }
++                }
++                if (!$r['is_absent'] && $r['last_punch']) {
++                    $lp = substr($r['last_punch'], 0, 5);
++                    if ($lp !== '' && $lp < $officeEnd) { $r['early_flag'] = true; $r['late_status'] = $r['late_flag'] ? 'late_early' : 'early'; }
++                }
++                if ($r['is_absent']) $r['late_status'] = 'absent';
++            }
++            unset($r);
++
+             // Apply search filter if provided — now checks Name/Title/Department as well (not just punches)
+             if ($search = $request->input('search.value')) {
+                 $data = array_filter($data, function($row) use ($search) {
+@@ -144,6 +174,22 @@ public function data(Request $request)
+             $recordsTotal = count($data);
+             $recordsFiltered = $recordsTotal;
+ 
++            // --- Tier 1: Work Hours Summary Card (before paginate, after filters) ---
++            $present = 0; $absent = 0; $late = 0; $totalWorkSec = 0; $workCount = 0;
++            foreach ($data as $r) {
++                if ($r['is_absent']) $absent++; else $present++;
++                if (!empty($r['late_flag'])) $late++;
++                if (!$r['is_absent'] && !empty($r['work_time'])) {
++                    $parts = explode(':', $r['work_time']);
++                    if (count($parts) >= 2) {
++                        $sec = ((int)$parts[0]*3600) + ((int)$parts[1]*60) + ((int)($parts[2] ?? 0));
++                        $totalWorkSec += $sec; $workCount++;
++                    }
++                }
++            }
++            $avgWork = $workCount ? gmdate('H:i', intdiv($totalWorkSec, $workCount)) : '—';
++            $summary = ['present'=>$present,'absent'=>$absent,'late'=>$late,'avg_work'=>$avgWork,'office_start'=>$officeStart,'office_end'=>$officeEnd];
++
+             // Sort by custom user view order (users without an order go last, sorted by user_id)
+             $orderMap = User::whereNotNull('view_order')->pluck('view_order', 'id')->toArray();
+             usort($data, function($a, $b) use ($orderMap) {
+@@ -164,6 +210,7 @@ public function data(Request $request)
+                 'recordsFiltered' => $recordsFiltered,
+                 'data' => $paged,
+                 'last_working_day' => $lastWorkingDay,
++                'summary' => $summary,
+             ]);
+         }
+ 
+diff --git a/dashboard/app/Http/Controllers/SettingController.php b/dashboard/app/Http/Controllers/SettingController.php
+index ff7d754..b5bb74b 100644
+--- a/dashboard/app/Http/Controllers/SettingController.php
++++ b/dashboard/app/Http/Controllers/SettingController.php
+@@ -15,6 +15,8 @@ public function index()
+             'weekend_days' => Setting::getValue('weekend_days', [5, 6]),
+             // Holidays as list of YYYY-MM-DD strings
+             'holidays' => Setting::getValue('holidays', []),
++            'office_start' => Setting::getValue('office_start', '09:30'),
++            'office_end' => Setting::getValue('office_end', '17:00'),
+         ]);
+     }
+ 
+@@ -26,6 +28,8 @@ public function update(Request $request)
+             'weekend_days.*' => 'integer|min:0|max:6',
+             'holidays' => 'sometimes|array',
+             'holidays.*' => 'date_format:Y-m-d',
++            'office_start' => 'sometimes|string|regex:/^\d{2}:\d{2}$/',
++            'office_end' => 'sometimes|string|regex:/^\d{2}:\d{2}$/',
+         ]);
+ 
+         if (array_key_exists('weekend_days', $data)) {
+@@ -36,6 +40,12 @@ public function update(Request $request)
+             sort($holidays);
+             Setting::setValue('holidays', $holidays);
+         }
++        if (array_key_exists('office_start', $data)) {
++            Setting::setValue('office_start', $data['office_start']);
++        }
++        if (array_key_exists('office_end', $data)) {
++            Setting::setValue('office_end', $data['office_end']);
++        }
+ 
+         return $this->index();
+     }
+diff --git a/dashboard/resources/views/analytics.blade.php b/dashboard/resources/views/analytics.blade.php
+new file mode 100644
+index 0000000..9e50099
+--- /dev/null
++++ b/dashboard/resources/views/analytics.blade.php
+@@ -0,0 +1,134 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1.0">
++<meta name="csrf-token" content="{{ csrf_token() }}">
++<title>Analytics — Attendance Dashboard</title>
++<link rel="icon" href="{{ asset('favicon.ico') }}" type="image/x-icon">
++<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
++<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
++@include('partials.styles')
++<style>
++.chart-card { background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.18); border-radius: 12px; }
++.chart-card .card-header { background: rgba(255,255,255,0.6); border-bottom: 1px solid rgba(100,116,139,0.08); font-weight: 600; }
++</style>
++</head>
++<body>
++
++<nav class="navbar-header">
++    <button class="sidebar-toggle" id="sidebarToggle" title="Menu"><i class="bi bi-list"></i></button>
++    <a href="/" style="font: inherit; color: inherit; text-decoration: none;">
++    <div class="logo"><i class="bi bi-clock-history"></i>Attendance Dashboard</div>
++    </a>
++    <div class="date-time" id="currentDateTime"></div>
++</nav>
++
++<div class="sidebar" id="sidebar">
++    <a href="/" data-type="daily"><i class="bi bi-calendar-day"></i> Daily</a>
++    <a href="/" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
++    <a href="/" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
++    <a href="/" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
++    <a href="/analytics" class="active"><i class="bi bi-graph-up"></i> Analytics</a>
++    @if(env('ATTENDANCE2_ENABLED'))
++    <a href="/attendance2" id="attendance2Link"><i class="bi bi-shield-lock"></i> Door Monitor</a>
++    @endif
++    <hr>
++    <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
++</div>
++
++<div class="content">
++    <div class="content-wrapper">
++        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
++            <h4 class="mb-0"><i class="bi bi-graph-up"></i> Analytics Dashboard</h4>
++            <div class="ms-auto d-flex align-items-center gap-2">
++                <input type="month" id="ana-month" class="form-control form-control-sm" value="{{ date('Y-m') }}" style="width:150px;">
++                <button id="ana-apply" class="btn btn-primary btn-sm">Apply</button>
++                <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
++            </div>
++        </div>
++
++        <div class="row g-3">
++            <div class="col-12">
++                <div class="card chart-card">
++                    <div class="card-header d-flex align-items-center gap-2"><i class="bi bi-bar-chart"></i> Daily Attendance % (this month) <span class="ms-auto small text-muted" id="ana-office"></span></div>
++                    <div class="card-body"><canvas id="chartPresent" height="80"></canvas></div>
++                </div>
++            </div>
++            <div class="col-12 col-lg-6">
++                <div class="card chart-card">
++                    <div class="card-header"><i class="bi bi-people"></i> Department Avg Work Hours (this month)</div>
++                    <div class="card-body"><canvas id="chartDept" height="120"></canvas></div>
++                </div>
++            </div>
++            <div class="col-12 col-lg-6">
++                <div class="card chart-card">
++                    <div class="card-header"><i class="bi bi-clock-history"></i> Late Arrivals — Last 30 Days</div>
++                    <div class="card-body"><canvas id="chartLate" height="120"></canvas></div>
++                </div>
++            </div>
++        </div>
++    </div>
++</div>
++
++<footer>
++    <div class="copyright">&copy; {{ date("Y") }} Attendance Management System</div>
++    <div class="maintenance" style="margin-left: auto;">Maintenance by <a href="https://lifaet.github.io">ZIM</a></div>
++</footer>
++
++<form id="logoutForm" method="POST" action="/logout" style="display:none;">@csrf</form>
++
++<script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
++<script>
++$(function(){
++    $.ajaxSetup({ headers: { 'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content') } });
++    // clock
++    function tick(){ const n=new Date(); $('#currentDateTime').text(n.toLocaleString('en-GB',{weekday:'short',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})); }
++    tick(); setInterval(tick,1000);
++    $('#sidebarToggle').click(function(){ $('#sidebar').toggleClass('show'); });
++    $(document).click(function(e){ if(!$(e.target).closest('#sidebar, #sidebarToggle').length) $('#sidebar').removeClass('show'); });
++    $('#logoutBtn').click(function(e){ e.preventDefault(); $('#logoutForm').submit(); });
++
++    let c1=null,c2=null,c3=null;
++    function load(){
++        const month = $('#ana-month').val();
++        $.getJSON('/api/analytics', { month }, function(res){
++            $('#ana-office').text('Office: ' + (res.office_start||'09:30') + ' – ' + (res.office_end||'17:00'));
++            // chart 1: daily present %
++            const labels1 = res.daily_present.map(x => x.date.slice(8));
++            const data1 = res.daily_present.map(x => x.pct);
++            if(c1) c1.destroy();
++            c1 = new Chart(document.getElementById('chartPresent'), {
++                type: 'line',
++                data: { labels: labels1, datasets: [{ label: 'Present %', data: data1, borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.1)', fill: true, tension: 0.3, spanGaps: true }] },
++                options: { responsive: true, scales: { y: { min:0, max:100, ticks: { callback: v => v+'%' } } }, plugins: { legend: { display: false } } }
++            });
++            // chart 2: dept avg hours
++            const deptLabels = res.dept_avg.map(x => x.dept);
++            const deptHours = res.dept_avg.map(x => (x.avg_sec/3600).toFixed(2));
++            if(c2) c2.destroy();
++            c2 = new Chart(document.getElementById('chartDept'), {
++                type: 'bar',
++                data: { labels: deptLabels, datasets: [{ label: 'Avg Hours', data: deptHours, backgroundColor: 'rgba(2,132,199,0.6)', borderColor: '#0284c7', borderWidth: 1 }]},
++                options: { indexAxis: 'y', responsive: true, scales: { x: { min:0, max:12, title: { display:true, text:'Hours' } } }, plugins: { legend: { display:false }, tooltip: { callbacks: { label: ctx => ctx.raw + ' h (' + res.dept_avg[ctx.dataIndex].avg_hours + ')' } } } }
++            });
++            // chart 3: late trend
++            const lateLabels = res.late_trend.map(x => x.date.slice(5));
++            const lateData = res.late_trend.map(x => x.late);
++            if(c3) c3.destroy();
++            c3 = new Chart(document.getElementById('chartLate'), {
++                type: 'bar',
++                data: { labels: lateLabels, datasets: [{ label: 'Late', data: lateData, backgroundColor: 'rgba(234,179,8,0.7)', borderColor: '#a16207', borderWidth: 1 }]},
++                options: { responsive: true, scales: { y: { beginAtZero:true, ticks:{ stepSize:1 } } }, plugins: { legend: { display:false } } }
++            });
++        }).fail(function(xhr){ console.error(xhr); });
++    }
++    $('#ana-apply').click(load);
++    $('#ana-month').change(load);
++    load();
++});
++</script>
++</body>
++</html>
+diff --git a/dashboard/resources/views/attendance2.blade.php b/dashboard/resources/views/attendance2.blade.php
+index 5f446e4..af95d8b 100644
+--- a/dashboard/resources/views/attendance2.blade.php
++++ b/dashboard/resources/views/attendance2.blade.php
+@@ -1,428 +1,199 @@
+ <!DOCTYPE html>
+ <html lang="en">
+-
+ <head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <meta name="csrf-token" content="{{ csrf_token() }}">
+-    <title>Attendance2 - Punch Timestamps</title>
+-    <link rel="icon" href="{{ asset('favicon.ico') }}" type="image/x-icon">
+-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+-    <link href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+-    <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
+-
+-        html,
+-        body {
+-            height: 100%;
+-        }
+-
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+-            background: linear-gradient(135deg, #f0f4f8 0%, #d9e8f5 50%, #f0f4f8 100%);
+-            min-height: 100vh;
+-            display: flex;
+-            flex-direction: column;
+-            color: #1e293b;
+-        }
+-
+-        /* Header Navigation - Light Glass Effect */
+-        .navbar-header {
+-            background: rgba(255, 255, 255, 0.5);
+-            backdrop-filter: blur(12px);
+-            border-bottom: 1px solid rgba(100, 116, 139, 0.1);
+-            padding: 0.75rem 1.5rem;
+-            color: #1e293b;
+-            position: fixed;
+-            top: 0;
+-            left: 0;
+-            right: 0;
+-            z-index: 1000;
+-            display: flex;
+-            justify-content: space-between;
+-            align-items: center;
+-        }
+-
+-        .navbar-header .logo {
+-            font-size: 1.1rem;
+-            font-weight: 600;
+-            margin: 0;
+-            display: flex;
+-            align-items: center;
+-            gap: 0.4rem;
+-            letter-spacing: -0.3px;
+-        }
+-
+-        .navbar-header .logo i {
+-            color: #0284c7;
+-        }
+-
+-        .navbar-header .date-time {
+-            font-size: 0.75rem;
+-            opacity: 0.7;
+-        }
+-
+-        /* Content - Full Height */
+-        .content {
+-            margin-top: 56px;
+-            padding: 0;
+-            flex: 1;
+-            overflow-y: auto;
+-            display: flex;
+-            flex-direction: column;
+-        }
+-
+-        .content-wrapper {
+-            background: rgba(255, 255, 255, 0.4);
+-            backdrop-filter: blur(10px);
+-            border: 1px solid rgba(100, 116, 139, 0.1);
+-            border-radius: 0;
+-            padding: 0.8rem;
+-            box-shadow: none;
+-            flex: 1;
+-            display: flex;
+-            flex-direction: column;
+-        }
+-
+-        /* Tables */
+-        .table {
+-            border-radius: 0;
+-            overflow: hidden;
+-            margin-bottom: 0;
+-            font-size: 0.85rem;
+-            flex: 1;
+-        }
+-
+-        .table thead {
+-            background: rgba(255, 255, 255, 0.8);
+-            color: #1e293b;
+-            border-bottom: 2px solid rgba(100, 116, 139, 0.15);
+-        }
+-
+-        .table thead th {
+-            padding: 0.6rem 0.6rem;
+-            font-weight: 600;
+-            border: none;
+-        }
+-
+-        .table tbody td {
+-            padding: 0.5rem 0.6rem;
+-            vertical-align: middle;
+-            border-color: rgba(100, 116, 139, 0.08);
+-        }
+-
+-        .table tbody tr {
+-            transition: all 0.2s;
+-            border-bottom: 1px solid rgba(100, 116, 139, 0.08);
+-            background: rgba(255, 255, 255, 0.2);
+-        }
+-
+-        .table tbody tr:hover {
+-            background: rgba(2, 132, 199, 0.08);
+-        }
+-
+-        /* Toast Notifications */
+-        .toast-container {
+-            position: fixed;
+-            top: 80px;
+-            right: 1rem;
+-            z-index: 2000;
+-        }
+-
+-        .toast {
+-            border-radius: 8px;
+-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+-            border: 1px solid rgba(100, 116, 139, 0.1);
+-            backdrop-filter: blur(8px);
+-            font-size: 0.85rem;
+-        }
+-
+-        .toast.bg-success {
+-            background: rgba(34, 197, 94, 0.85) !important;
+-        }
+-
+-        /* Scrollbar styling */
+-        ::-webkit-scrollbar {
+-            width: 6px;
+-        }
+-
+-        ::-webkit-scrollbar-track {
+-            background: rgba(100, 116, 139, 0.08);
+-        }
+-
+-        ::-webkit-scrollbar-thumb {
+-            background: rgba(2, 132, 199, 0.4);
+-            border-radius: 3px;
+-        }
+-
+-        ::-webkit-scrollbar-thumb:hover {
+-            background: rgba(2, 132, 199, 0.6);
+-        }
+-
+-        /* Ensure DataTables stretch to container width and recalc reliably */
+-        .dataTable,
+-        #attendanceTable,
+-        #userTable {
+-            width: 100% !important;
+-        }
+-    </style>
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1.0">
++<meta name="csrf-token" content="{{ csrf_token() }}">
++<title>Door Monitor — Attendance Dashboard</title>
++<link rel="icon" href="{{ asset('favicon.ico') }}" type="image/x-icon">
++<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
++<link href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css" rel="stylesheet">
++<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
++@include('partials.styles')
++<style>
++@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); } 70% { box-shadow: 0 0 0 10px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
++.live-dot { width:10px; height:10px; background:#22c55e; border-radius:50%; display:inline-block; animation: pulse 2s infinite; }
++.door-card { background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.18); border-radius: 12px; }
++</style>
+ </head>
+-
+ <body>
+ 
+-    <!-- Header Navigation -->
+-    <nav class="navbar-header">
+-        <a href="/" style="font: inherit; color: inherit; text-decoration: none;">
+-            <div class="logo">
+-                <i class="bi bi-clock-history"></i>Attendance2 - Punch Timestamps
++<nav class="navbar-header">
++    <button class="sidebar-toggle" id="sidebarToggle" title="Menu"><i class="bi bi-list"></i></button>
++    <a href="/" style="font: inherit; color: inherit; text-decoration: none;">
++    <div class="logo"><i class="bi bi-clock-history"></i>Attendance Dashboard</div>
++    </a>
++    <div class="date-time" id="currentDateTime"></div>
++</nav>
++
++<div class="sidebar" id="sidebar">
++    <a href="/"><i class="bi bi-calendar-day"></i> Daily</a>
++    <a href="/"><i class="bi bi-calendar-month"></i> Monthly</a>
++    <a href="/"><i class="bi bi-person-circle"></i> User-wise</a>
++    <a href="/"><i class="bi bi-people"></i> User Directory</a>
++    <a href="/analytics"><i class="bi bi-graph-up"></i> Analytics</a>
++    <a href="/attendance2" class="active"><i class="bi bi-shield-lock"></i> Door Monitor <span id="doorLiveBadge2" class="badge bg-success ms-auto">0</span></a>
++    <hr>
++    <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
++</div>
++
++<div class="content">
++    <div class="content-wrapper">
++        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
++            <h4 class="mb-0"><i class="bi bi-shield-lock"></i> Door Monitor <span class="live-dot ms-2"></span> <small class="text-muted" style="font-size:0.7rem;">Live</small></h4>
++            <div class="ms-auto d-flex align-items-center gap-2">
++                <span class="badge bg-success" id="doorTotal">0 today</span>
++                <a href="/" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Dashboard</a>
+             </div>
+-        </a>
+-        <div class="date-time" id="currentDateTime"></div>
+-    </nav>
++        </div>
+ 
+-    <!-- Main Content -->
+-    <div class="content">
+-        <div class="content-wrapper">
+-            <div class="d-flex justify-content-between align-items-center mb-3">
+-                <h4 class="mb-0">Device Punch Timestamps</h4>
+-                <a href="/" class="btn btn-outline-secondary">
+-                    <i class="bi bi-arrow-left"></i> Back to Dashboard
+-                </a>
++        <!-- Tier 1: Door Monitor Live Pulse — last 5 + total poll 5s -->
++        <div id="doorPulse" class="row g-2 mb-3">
++            <div class="col-12 col-md-4">
++                <div class="card door-card h-100">
++                    <div class="card-body py-3 text-center">
++                        <div class="small text-muted">Total Today</div>
++                        <div class="display-6 fw-bold" id="doorCount" style="color:#0284c7;">0</div>
++                        <div class="small text-muted" id="doorPulseTime">—</div>
++                    </div>
++                </div>
++            </div>
++            <div class="col-12 col-md-8">
++                <div class="card door-card h-100">
++                    <div class="card-body py-2">
++                        <div class="small fw-bold mb-1"><i class="bi bi-activity"></i> Last 5 Unlocks</div>
++                        <div id="doorLastFive" class="d-flex flex-column gap-1">
++                            <div class="text-muted small">Loading…</div>
++                        </div>
++                    </div>
++                </div>
+             </div>
+-
+-            <table id="attendanceTable" class="table table-striped table-bordered">
+-                <thead>
+-                    <tr>
+-                        <th>User</th>
+-                        <th>Timestamp</th>
+-                        <th>Punch</th>
+-                        <th>VerifyID</th>
+-                    </tr>
+-                </thead>
+-            </table>
+         </div>
+-    </div>
+-
+-    <!-- Toast Container -->
+-    <div class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+-
+-    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+-    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+-    <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+ 
+-    <script>
+-        let table;
+-        let lastCheckId = 0; // last known entry ID
+-        // Polling interval (ms) for /api/attendance2-latest. Lower values = more frequent checks.
+-        // Be careful lowering too far: very frequent polling increases DB/load. Default 4000ms = 4s.
+-        const CHECK_LATEST_INTERVAL_MS = 4000;
+-
+-        $(document).ready(function () {
+-            // include CSRF token for all AJAX POST requests
+-            $.ajaxSetup({
+-                headers: {
+-                    'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
+-                }
+-            });
+-
+-            // Load user directory from server first, then initialize DataTable
+-            loadUserFromServer();
+-        });
+-
+-        // Load user directory from server and then initialize DataTable
+-        function loadUserFromServer() {
+-            $.ajax({ url: '/api/users', method: 'GET', dataType: 'json', cache: false })
+-                .done(function (res) {
+-                    if (Array.isArray(res)) {
+-                        window.userDirectory = res;
+-                    } else {
+-                        window.userDirectory = [];
+-                    }
+-                    // Now initialize DataTable after user data is loaded
+-                    initializeDataTable();
+-                }).fail(function () {
+-                    window.userDirectory = [];
+-                    showToast('Error', 'Failed to load users from server.');
+-                    // Still initialize DataTable even if user loading fails
+-                    initializeDataTable();
+-                });
+-        }
+-
+-        function initializeDataTable() {
+-            // Initialize DataTable
+-            table = $('#attendanceTable').DataTable({
+-                serverSide: true,
+-                processing: true,
+-                ajax: {
+-                    url: '/api/attendance2-summary',
+-                    xhrFields: {
+-                        withCredentials: true
+-                    },
+-                    data: function (d) {
+-                        // Add any additional data if needed
+-                    }
+-                },
+-                columns: [
+-                    {
+-                        data: 'user_id',
+-                        title: 'User',
+-                        render: function (data, type, row) {
+-                            // try to find user info from client-side directory
+-                            try {
+-                                var sid = parseInt(data, 10);
+-                                var s = (window.userDirectory || []).find(x => parseInt(x.id, 10) === sid);
+-                                if (s) {
+-                                    // show two-line format: ID Name then Designation, Department
+-                                    var dept = s.department || s.dept || '';
+-                                    var title = s.title || '';
+-                                    return `<div><strong>${s.name} (${data})</strong><br><small class="text-muted">${title}${dept ? (', ' + dept) : ''}</small></div>`;
+-                                }
+-                            } catch (e) { }
+-                            return data;
+-                        }
+-                    },
+-                    { data: 'timestamp', title: 'Timestamp' },
+-                    {
+-                        data: 'punch', render: function (d, type, row) {
+-                            // treat numeric/string 255 as automatic machine-sourced
+-                            if (d == 255 || d === '255') return '<span class="badge bg-info text-white">Auto</span>';
+-                            if (d) return '<span class="badge bg-warning text-dark">Manual</span>';
+-                            return '';
+-                        }
+-                    },
+-                    {
+-                        data: 'status',
+-                        title: 'VerifyID',
+-                        render: function (data, type, row) {
+-                            // Map status codes to short labels
+-                            if (data == 1 || data === '1') return 'FINID';
+-                            if (data == 4 || data === '4') return 'RFID';
+-                            return 'N/A';
+-                        }
+-                    }
+-                ],
+-                order: [[1, 'desc']],
+-                lengthMenu: [[50, 100, 200, 1000000], [50, 100, 200, "All"]],
+-                pageLength: 50
++        <table id="attendanceTable" class="table table-striped table-bordered">
++            <thead>
++                <tr>
++                    <th>User</th>
++                    <th>Timestamp</th>
++                    <th>Punch</th>
++                    <th>VerifyID</th>
++                </tr>
++            </thead>
++        </table>
++    </div>
++</div>
++
++<footer>
++    <div class="copyright">&copy; {{ date("Y") }} Attendance Management System</div>
++    <div class="maintenance" style="margin-left: auto;">Maintenance by <a href="https://lifaet.github.io">ZIM</a></div>
++</footer>
++
++<form id="logoutForm" method="POST" action="/logout" style="display:none;">@csrf</form>
++<div class="toast-container position-fixed bottom-0 end-0 p-3"></div>
++
++<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
++<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
++<script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
++<script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
++<script>
++let table;
++let lastCheckId = 0;
++const CHECK_LATEST_INTERVAL_MS = 4000;
++$(document).ready(function(){
++    $.ajaxSetup({ headers: { 'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content') } });
++    // clock + sidebar
++    function tick(){ const n=new Date(); $('#currentDateTime').text(n.toLocaleString('en-GB',{weekday:'short',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})); }
++    tick(); setInterval(tick,1000);
++    $('#sidebarToggle').click(function(){ $('#sidebar').toggleClass('show'); });
++    $(document).click(function(e){ if(!$(e.target).closest('#sidebar, #sidebarToggle').length) $('#sidebar').removeClass('show'); });
++    $('#logoutBtn').click(function(e){ e.preventDefault(); $('#logoutForm').submit(); });
++
++    loadUserFromServer();
++    initPulse();
++});
++
++function loadUserFromServer(){
++    $.ajax({ url: '/api/users', method: 'GET', dataType: 'json', cache: false }).done(function(res){
++        window.userDirectory = Array.isArray(res) ? res : [];
++        initializeDataTable();
++    }).fail(function(){ window.userDirectory=[]; initializeDataTable(); });
++}
++function userLabel(id){
++    try{ const sid=parseInt(id,10); const s=(window.userDirectory||[]).find(x=>parseInt(x.id,10)===sid); if(s){ return `<div><strong>${s.name} (${id})</strong><br><small class="text-muted">${s.title||''}${s.department?', '+s.department:''}</small></div>`;} }catch(e){}
++    return id;
++}
++function initializeDataTable(){
++    table = $('#attendanceTable').DataTable({
++        serverSide: true,
++        processing: true,
++        ajax: { url: '/api/attendance2-summary', xhrFields: { withCredentials: true } },
++        columns: [
++            { data: 'user_id', title: 'User', render: function(d,type,row){ if(row.name) return `<div><strong>${row.name} (${d})</strong><br><small class="text-muted">${row.title||''}${row.department?', '+row.department:''}</small></div>`; return userLabel(d); } },
++            { data: 'timestamp', title: 'Timestamp' },
++            { data: 'punch', render: function(d){ if(d==255||d==='255') return '<span class="badge bg-info text-white">Auto</span>'; if(d) return '<span class="badge bg-warning text-dark">Manual</span>'; return ''; } },
++            { data: 'status', title: 'VerifyID', render: function(d){ if(d==1||d==='1') return 'FINID'; if(d==4||d==='4') return 'RFID'; return 'N/A'; } }
++        ],
++        order: [[1,'desc']],
++        lengthMenu: [[50,100,200,1000000],[50,100,200,"All"]],
++        pageLength: 50
++    });
++    $.ajax({ url: '/api/attendance2-latest', method:'GET', dataType:'json', cache:false }).done(function(res){
++        lastCheckId = res && res.id ? (parseInt(res.id,10)||0) : 0;
++        setInterval(checkNewPunch, CHECK_LATEST_INTERVAL_MS);
++    }).fail(function(){ setInterval(checkNewPunch, CHECK_LATEST_INTERVAL_MS); });
++}
++function initPulse(){
++    function refresh(){
++        $.getJSON('/api/door-pulse').done(function(res){
++            const c = parseInt(res.count||res.recordsTotal||0,10)||0;
++            $('#doorCount').text(c);
++            $('#doorTotal').text(c+' today');
++            $('#doorLiveBadge2').text(c);
++            $('#doorPulseTime').text(new Date().toLocaleTimeString());
++            const last = res.last_five||[];
++            if(!last.length){ $('#doorLastFive').html('<div class="text-muted small">No punches today</div>'); return; }
++            let h='';
++            last.forEach(function(r){
++                const name = r.name ? r.name+' ('+r.user_id+')' : r.user_id;
++                h += `<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1" style="background:rgba(2,132,199,0.06);"><span><span class="live-dot" style="width:8px;height:8px;"></span> <strong>${name}</strong></span><span class="small text-muted">${r.time||r.timestamp}</span></div>`;
+             });
+-
+-            // first check last punch (store numeric id) and only start polling after we have attempted
+-            $.ajax({ url: '/api/attendance2-latest', method: 'GET', dataType: 'json', cache: false })
+-                .done(function (res) {
+-                    lastCheckId = res && res.id ? (parseInt(res.id, 10) || 0) : lastCheckId;
+-                    // start polling after initial successful fetch
+-                    setInterval(checkNewPunch, CHECK_LATEST_INTERVAL_MS);
+-                }).fail(function (xhr, status) {
+-                    console.debug('initial check-latest failed', status, xhr && xhr.status);
+-                    // even on failure, start polling so we can recover later
+-                    setInterval(checkNewPunch, CHECK_LATEST_INTERVAL_MS);
+-                });
+-
+-            // Update current date/time
+-            function updateDateTime() {
+-                const now = new Date();
+-                const options = {
+-                    year: 'numeric',
+-                    month: 'short',
+-                    day: 'numeric',
+-                    hour: '2-digit',
+-                    minute: '2-digit',
+-                    second: '2-digit'
+-                };
+-                document.getElementById('currentDateTime').textContent = now.toLocaleString('en-US', options);
+-            }
+-
+-            updateDateTime();
+-            setInterval(updateDateTime, 1000);
+-        }
+-
+-        function checkNewPunch() {
+-            // Use $.ajax with cache:false to avoid cached responses from proxies
+-            $.ajax({
+-                url: '/api/attendance2-latest',
+-                method: 'GET',
+-                dataType: 'json',
+-                cache: false,
+-                data: { last_id: lastCheckId }
+-            }).done(function (res) {
+-                // Defensive extraction: API might return {id:...} or {data:{id:...}} or {latest:{id:...}}
+-                function extractId(r) {
+-                    if (!r) return 0;
+-                    if (r.id) return parseInt(r.id, 10) || 0;
+-                    if (r.latest && r.latest.id) return parseInt(r.latest.id, 10) || 0;
+-                    if (r.data && r.data.id) return parseInt(r.data.id, 10) || 0;
+-                    // try first element if array
+-                    if (Array.isArray(r) && r.length && r[0].id) return parseInt(r[0].id, 10) || 0;
+-                    return 0;
+-                }
+-
+-                const id = extractId(res);
+-                console.debug('check-latest response', res, 'extractedId', id, 'lastCheckId', lastCheckId);
+-
+-                // If we haven't initialized lastCheckId yet (fresh page or initial failure),
+-                // set it to the server-provided id but DO NOT show a toast — this prevents
+-                // showing the current latest row as "new" on every poll when the server
+-                // falls back to returning the most recent row.
+-                if (!lastCheckId || lastCheckId === 0) {
+-                    lastCheckId = id;
+-                    return;
+-                }
+-
+-                if (id && id > lastCheckId) {
+-                    lastCheckId = id;
+-                    // Build a friendly message. If specific fields exist, show them; otherwise show a generic notice.
+-                    const user = res.user_id || res.user || null;
+-                    const time = res.time || res.timestamp || null;
+-                    const date = res.date || null;
+-                    let message = '';
+-                    if (user || time || date) {
+-                        // prefer a punch-style message when details available
+-                        message = `User ${user || 'Unknown'}` + (time ? ` recorded at ${time}` : '') + (date ? ` on ${date}` : '');
+-                    } else {
+-                        message = `New record added (id: ${id})`;
+-                    }
+-                    showToast('New Punch', message);
+-                    if (table && table.ajax && typeof table.ajax.reload === 'function') {
+-                        table.ajax.reload(null, false); // reload data silently
+-                    }
+-                }
+-            }).fail(function (xhr, status) {
+-                console.debug('check-latest failed', status, xhr && xhr.status);
+-                // On failure, don't update lastCheckId — keep polling with the last known good value
++            $('#doorLastFive').html(h);
++        }).fail(function(){
++            // fallback via attendance2-summary count
++            $.getJSON('/api/attendance2-summary', {start:0,length:1,draw:1}).done(function(res){
++                const c = parseInt(res.recordsTotal||0,10)||0;
++                $('#doorCount').text(c); $('#doorTotal').text(c+' today'); $('#doorLiveBadge2').text(c);
+             });
+-        }
+-
+-        function showToast(title, message) {
+-            const toastId = 'toast-' + Date.now();
+-            const toastHTML = `
+-      <div id="${toastId}" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+-        <div class="d-flex">
+-          <div class="toast-body">
+-            <strong>${title}</strong><br>${message}
+-          </div>
+-          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+-        </div>
+-      </div>`;
+-            // ensure a toast container exists (some other partials create it, but not always)
+-            if ($('.toast-container').length === 0) {
+-                $('body').append('<div class="toast-container position-fixed bottom-0 end-0 p-3"></div>');
+-            }
+-            $('.toast-container').append(toastHTML);
+-            const toastElement = new bootstrap.Toast(document.getElementById(toastId));
+-            toastElement.show();
+-            // auto-remove after 5 seconds
+-            setTimeout(() => {
+-                toastElement.dispose();
+-                $('#' + toastId).remove();
+-            }, 5000);
+-        }
+-    </script>
++        });
++    }
++    refresh();
++    setInterval(refresh, 5000);
++}
++function checkNewPunch(){
++    $.ajax({ url:'/api/attendance2-latest', method:'GET', dataType:'json', cache:false, data:{ last_id: lastCheckId } }).done(function(res){
++        function extractId(r){ if(!r) return 0; if(r.id) return parseInt(r.id,10)||0; if(r.latest&&r.latest.id) return parseInt(r.latest.id,10)||0; if(r.data&&r.data.id) return parseInt(r.data.id,10)||0; if(Array.isArray(r)&&r.length&&r[0].id) return parseInt(r[0].id,10)||0; return 0; }
++        const id = extractId(res);
++        if(!lastCheckId||lastCheckId===0){ lastCheckId=id; return; }
++        if(id && id>lastCheckId){
++            lastCheckId=id;
++            const user=res.user_id||res.user||'Unknown';
++            const time=res.time||res.timestamp||'';
++            const date=res.date||'';
++            let msg=`User ${user}`+(time?` recorded at ${time}`:'')+(date?` on ${date}`:''); 
++            showToast('New Punch', msg);
++            if(table && table.ajax) table.ajax.reload(null,false);
++        }
++    });
++}
++function showToast(title, message){
++    const toastId='toast-'+Date.now();
++    const toastHTML=`<div id="${toastId}" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true"><div class="d-flex"><div class="toast-body"><strong>${title}</strong><br>${message}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>`;
++    if($('.toast-container').length===0) $('body').append('<div class="toast-container position-fixed bottom-0 end-0 p-3"></div>');
++    $('.toast-container').append(toastHTML);
++    const toastElement=new bootstrap.Toast(document.getElementById(toastId));
++    toastElement.show();
++    setTimeout(()=>{ toastElement.dispose(); $('#'+toastId).remove(); },5000);
++}
++</script>
+ </body>
+-
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/dashboard/resources/views/dashboard.blade.php b/dashboard/resources/views/dashboard.blade.php
+index 4b462d2..93b6299 100644
+--- a/dashboard/resources/views/dashboard.blade.php
++++ b/dashboard/resources/views/dashboard.blade.php
+@@ -30,8 +30,9 @@
+     <a href="#" data-type="monthly"><i class="bi bi-calendar-month"></i> Monthly</a>
+     <a href="#" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
+     <a href="#" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
++    <a href="/analytics" id="analyticsLink"><i class="bi bi-graph-up"></i> Analytics</a>
+     @if(env('ATTENDANCE2_ENABLED'))
+-    <a href="/attendance2" id="attendance2Link"><i class="bi bi-clock"></i> Attendance2 <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
++    <a href="/attendance2" id="attendance2Link"><i class="bi bi-shield-lock"></i> Door Monitor <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
+     @endif
+     <hr>
+     <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
+@@ -93,6 +94,41 @@
+     </div>
+ 
+     <div id="attendanceSection">
++    <!-- Tier 1: Work Hours Summary Cards (daily only) -->
++    <div id="summaryCards" class="row g-2 mb-3 d-none">
++        <div class="col-6 col-md-3">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
++                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
++                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(34,197,94,0.15); color:#16a34a;"><i class="bi bi-check-circle"></i></div>
++                    <div><div class="small text-muted" style="font-size:0.7rem;">Present</div><div class="fw-bold" id="sumPresent">—</div></div>
++                </div>
++            </div>
++        </div>
++        <div class="col-6 col-md-3">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
++                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
++                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(239,68,68,0.15); color:#dc2626;"><i class="bi bi-x-circle"></i></div>
++                    <div><div class="small text-muted" style="font-size:0.7rem;">Absent</div><div class="fw-bold" id="sumAbsent">—</div></div>
++                </div>
++            </div>
++        </div>
++        <div class="col-6 col-md-3">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
++                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
++                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(234,179,8,0.2); color:#a16207;"><i class="bi bi-clock-history"></i></div>
++                    <div><div class="small text-muted" style="font-size:0.7rem;">Late</div><div class="fw-bold" id="sumLate">—</div></div>
++                </div>
++            </div>
++        </div>
++        <div class="col-6 col-md-3">
++            <div class="card border-0 shadow-sm" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(8px);">
++                <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
++                    <div class="rounded-circle d-flex align-items-center justify-content-center" style="width:36px; height:36px; background: rgba(2,132,199,0.15); color:#0284c7;"><i class="bi bi-stopwatch"></i></div>
++                    <div><div class="small text-muted" style="font-size:0.7rem;">Avg Work</div><div class="fw-bold" id="sumAvg">—</div></div>
++                </div>
++            </div>
++        </div>
++    </div>
+     <table id="attendanceTable" class="table table-striped table-bordered">
+         <thead>
+             <tr>
+@@ -102,6 +138,7 @@
+                 <th>First Punch</th>
+                 <th>Last Punch</th>
+                 <th>Work Time</th>
++                <th>Flag</th>
+                 <th>Type</th>
+                 <th>VerifyID</th>
+                 <th>Actions</th>
+@@ -175,6 +212,15 @@
+                     <small class="text-muted">Used to find the previous working day for the "Last Day Last Punch" column.</small>
+                 </div>
+                 <hr>
++                <div class="mb-3">
++                    <label class="form-label fw-bold">Office Hours</label>
++                    <div class="row g-2" style="max-width:280px;">
++                        <div class="col-6"><label class="form-label small">Start</label><input type="time" id="office-start" class="form-control form-control-sm" value="09:30"></div>
++                        <div class="col-6"><label class="form-label small">End</label><input type="time" id="office-end" class="form-control form-control-sm" value="17:00"></div>
++                    </div>
++                    <small class="text-muted">Late if first punch &gt; Start, Early if last punch &lt; End</small>
++                </div>
++                <hr>
+                 <div class="mb-2">
+                     <label class="form-label fw-bold">Holidays</label>
+                     <div class="input-group mb-2" style="max-width:280px;">
+diff --git a/dashboard/resources/views/partials/scripts.blade.php b/dashboard/resources/views/partials/scripts.blade.php
+index 4313178..b7bc950 100644
+--- a/dashboard/resources/views/partials/scripts.blade.php
++++ b/dashboard/resources/views/partials/scripts.blade.php
+@@ -124,24 +124,7 @@ function loadDeptFilter(){
+     if (cur) sel.val(cur);
+ }
+ 
+-// Dept filter — DataTables custom search (client-side, no backend change)
+-$.fn.dataTable.ext.search.push(function(settings, data, dataIndex){
+-    if (settings.nTable && settings.nTable.id !== 'attendanceTable') return true;
+-    const deptFilter = ($('#filter-dept').val() || '').trim().toLowerCase();
+-    if (!deptFilter || currentType !== 'daily') return true;
+-    try {
+-        const row = settings.oInstance.api().row(dataIndex).data();
+-        if (!row) return true;
+-        const dept = ((row.department || row.dept || '') + '').toLowerCase();
+-        // fallback to userDirectory
+-        if (!dept && row.user_id) {
+-            const s = (window.userDirectory || []).find(x => String(x.id) === String(row.user_id));
+-            const d2 = (s && (s.department || s.dept) || '').toLowerCase();
+-            return d2 === deptFilter;
+-        }
+-        return dept === deptFilter;
+-    } catch(e){ return true; }
+-});
++// Dept filter now server-side via d.dept — client filter removed
+ 
+ function initColvis(){
+     const menu = $('#colvisMenu');
+@@ -215,16 +198,17 @@ function initDoorBadge(){
+     if (!badge.length) return;
+     function refresh(){
+         // attendance2 may not be enabled — fail silently
+-        $.getJSON('/api/attendance2/summary', { date: new Date().toISOString().slice(0,10) }).done(function(res){
+-            const count = (res && (res.total || (res.data && res.data.length) || res.count)) || 0;
++        $.getJSON('/api/door-pulse').done(function(res){
++            const count = (res && (res.count ?? res.recordsTotal ?? res.total ?? (res.data && res.data.length) ?? res.count)) || 0;
+             if (count > 0) badge.text(count + ' today').show();
+             else badge.text('0 today').show();
+         }).fail(function(){
+-            // try alternative endpoint
+-            $.getJSON('/api/check-latest', { type: 'door' }).done(function(res){
+-                const c = res && res.count ? res.count : null;
+-                if (c !== null) badge.text(c + ' today').show();
+-            }).fail(function(){});
++            $.getJSON('/api/attendance2-summary', { start:0, length:1, draw:1 }).done(function(res){ const c=(res&&res.recordsTotal)||0; badge.text(c+' today').show(); }).fail(function(){
++                $.getJSON('/api/check-latest', { type: 'door' }).done(function(res){
++                    const c = res && res.count ? res.count : null;
++                    if (c !== null) badge.text(c + ' today').show();
++                }).fail(function(){});
++            });
+         });
+     }
+     refresh();
+@@ -344,6 +328,7 @@ function extractId(r){
+                 d.date = $('#filter-date').val();
+                 d.month = $('#filter-month').val();
+                 d.user = $('#filter-user').val();
++                d.dept = $('#filter-dept').val() || '';
+             },
+             error: function(xhr, textStatus, error){
+                 console.error('DataTables ajax error', xhr && xhr.status, textStatus, error);
+@@ -396,6 +381,13 @@ function extractId(r){
+             } },
+             { data: 'last_punch', render: d => d ? d : '' },
+             { data: 'work_time', render: d => d ? d : '' },
++            { data: 'late_status', render: function(d, type, row){
++                if (row.is_absent) return '<span class="badge bg-danger">Absent</span>';
++                if (d === 'late') return '<span class="badge bg-warning text-dark">Late</span>';
++                if (d === 'early') return '<span class="badge bg-info">Early</span>';
++                if (d === 'late_early') return '<span class="badge bg-warning text-dark">Late</span> <span class="badge bg-info">Early</span>';
++                return '<span class="badge bg-success">On Time</span>';
++            }},
+             { data: 'punch', render: function(d, type, row) {
+                 // treat numeric/string 255 as automatic machine-sourced
+                 if (d == 255 || d === '255') return '<span class="badge bg-info text-white">Auto</span>';
+@@ -429,6 +421,7 @@ function extractId(r){
+         pageLength: 25,
+         createdRow: function(row, data){
+             if (data.is_absent) $(row).addClass('row-absent');
++            else if (data.late_flag) $(row).addClass('row-late');
+             else if (data.work_time) {
+                 const parts = String(data.work_time).split(':');
+                 const h = parseInt(parts[0]||0,10), m = parseInt(parts[1]||0,10);
+@@ -444,6 +437,16 @@ function extractId(r){
+                 // update empty date hint
+                 const d = $('#filter-date').val() || '';
+                 $('.js-empty-date').text(d);
++                // Tier 1: summary cards
++                if (json && json.summary && currentType === 'daily') {
++                    $('#sumPresent').text(json.summary.present ?? '—');
++                    $('#sumAbsent').text(json.summary.absent ?? '—');
++                    $('#sumLate').text(json.summary.late ?? '—');
++                    $('#sumAvg').text(json.summary.avg_work ?? '—');
++                    $('#summaryCards').removeClass('d-none');
++                } else {
++                    $('#summaryCards').addClass('d-none');
++                }
+             } catch(e){}
+         },
+         preDrawCallback: function(settings){
+@@ -882,6 +885,8 @@ function renderHolidayList() {
+                 });
+                 settingsHolidays = (res && Array.isArray(res.holidays)) ? res.holidays : [];
+                 renderHolidayList();
++                $('#office-start').val(res.office_start || '09:30');
++                $('#office-end').val(res.office_end || '17:00');
+                 $('#settingsModal').modal('show');
+             }).fail(function(){
+                 showToast('Error', 'Failed to load settings');
+@@ -904,14 +909,16 @@ function renderHolidayList() {
+ 
+     $('#saveSettingsBtn').click(function(){
+         const weekendDays = $('.weekend-day:checked').map(function(){ return Number($(this).val()); }).get();
++        const officeStart = $('#office-start').val() || '09:30';
++        const officeEnd = $('#office-end').val() || '17:00';
+         $.ajax({
+             url: '/api/settings',
+             method: 'POST',
+             contentType: 'application/json',
+-            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays })
++            data: JSON.stringify({ weekend_days: weekendDays, holidays: settingsHolidays, office_start: officeStart, office_end: officeEnd })
+         }).done(function(){
+             $('#settingsModal').modal('hide');
+-            showToast('Saved', 'Weekend & holiday settings updated');
++            showToast('Saved', 'Settings updated');
+             if (table && table.ajax && typeof table.ajax.reload === 'function') table.ajax.reload(null, false);
+         }).fail(function(xhr){
+             const msg = (xhr && xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : 'Failed to save settings';
+diff --git a/dashboard/resources/views/partials/styles.blade.php b/dashboard/resources/views/partials/styles.blade.php
+index 4acadc8..235be00 100644
+--- a/dashboard/resources/views/partials/styles.blade.php
++++ b/dashboard/resources/views/partials/styles.blade.php
+@@ -353,10 +353,18 @@
+ #attendanceTable tbody tr.row-absent:hover {
+     background: rgba(254, 226, 226, 0.9) !important;
+ }
+-#attendanceTable tbody tr.row-short {
++#attendanceTable tbody tr.row-late {
++            background: rgba(234,179,8,0.08) !important;
++            border-left: 3px solid #eab308;
++        }
++        .row-short {
+     background: rgba(254, 249, 195, 0.75) !important; /* light yellow for <8h */
+ }
+-#attendanceTable tbody tr.row-short:hover {
++#attendanceTable tbody tr.row-late {
++            background: rgba(234,179,8,0.08) !important;
++            border-left: 3px solid #eab308;
++        }
++        .row-short:hover {
+     background: rgba(253, 244, 155, 0.85) !important;
+ }
+ 
+diff --git a/dashboard/routes/web.php b/dashboard/routes/web.php
+index 8cd7b49..e4b4f6d 100644
+--- a/dashboard/routes/web.php
++++ b/dashboard/routes/web.php
+@@ -11,6 +11,7 @@
+ use App\Http\Controllers\DashboardController;
+ use App\Http\Controllers\AttendanceController;
+ use App\Http\Controllers\Attendance2Controller;
++use App\Http\Controllers\AnalyticsController;
+ use App\Http\Middleware\DashboardAuth;
+ 
+ // Public
+@@ -26,6 +27,7 @@
+     Route::get('/attendance2', [Attendance2Controller::class, 'index']);
+     Route::get('/api/attendance2-summary', [Attendance2Controller::class, 'data']);
+     Route::get('/api/attendance2-latest', [Attendance2Controller::class, 'latest']);
++    Route::get('/api/door-pulse', [Attendance2Controller::class, 'summary']);
+ });
+ 
+ // Primary attendance (1 device = standard)
+@@ -42,4 +44,6 @@
+     Route::delete('/api/users/{id}', [\App\Http\Controllers\UserController::class, 'destroy']);
+     Route::get('/api/settings', [\App\Http\Controllers\SettingController::class, 'index']);
+     Route::post('/api/settings', [\App\Http\Controllers\SettingController::class, 'update']);
++    Route::get('/api/analytics', [AnalyticsController::class, 'data']);
+ });
++Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(DashboardAuth::class);
+-- 
+2.47.3
+
