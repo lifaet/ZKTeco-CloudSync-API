@@ -1,22 +1,11 @@
-"""
-create_db_fixed.py — creates DB + tables if missing
-Use Laravel migrations as source of truth when possible:
-  cd dashboard && php artisan migrate
-This script is a standalone fallback for pure-Python deploys.
-
-Changes vs original:
- - Single entry for both tables, reuses PRIMARY standard config
- - Optional 2nd table only if ENABLE_SECOND_DEVICE
- - Uses IF NOT EXISTS + proper FK type alignment (user_id INT unsigned vs INT)
- - No insertion test that leaves rows
-"""
+"""Create the database and attendance tables when they are missing."""
 import pymysql, os, sys, logging, time
 from logging.handlers import RotatingFileHandler
 
 try:
     import config as cfg
 except ImportError:
-    print("config.py missing — copy config.example.py", file=sys.stderr); sys.exit(1)
+    print("ERROR: config.py missing. Copy config.example.py to config.py.", file=sys.stderr); sys.exit(1)
 
 def log():
     l = logging.getLogger('create_db'); l.setLevel(logging.INFO)
@@ -37,12 +26,11 @@ def conn(database=None):
 def ensure():
     c = None
     try:
-        logger.info("Connecting to MySQL...")
+        logger.info("Connecting to MySQL")
         c = conn()
         with c.cursor() as cur:
             cur.execute(f"CREATE DATABASE IF NOT EXISTS `{cfg.DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             cur.execute(f"USE `{cfg.DB_NAME}`")
-            # users / settings are managed by Laravel — create here only if missing
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                   id INT NOT NULL PRIMARY KEY,
@@ -61,7 +49,6 @@ def ensure():
                   created_at TIMESTAMP NULL, updated_at TIMESTAMP NULL
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
-            # primary attendances
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS `{cfg.TABLE_NAME}` (
                   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -74,7 +61,6 @@ def ensure():
                   INDEX idx_timestamp (timestamp), INDEX idx_user_id (user_id), INDEX idx_created_at (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
-            # optional second
             if getattr(cfg,'ENABLE_SECOND_DEVICE', False):
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS `{cfg.TABLE_NAME2}` (
@@ -90,14 +76,13 @@ def ensure():
             else:
                 logger.info(f"Table `{cfg.TABLE_NAME}` ready (second device disabled)")
 
-            # verify write
             for t in [cfg.TABLE_NAME] + ([cfg.TABLE_NAME2] if getattr(cfg,'ENABLE_SECOND_DEVICE',False) else []):
                 cur.execute(f"SELECT 1 FROM `{t}` LIMIT 1")
                 cur.fetchone()
-            logger.info("Verification OK")
+            logger.info("Database verification passed")
             return True
     except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True); return False
+        logger.error(f"Database setup failed: {e}", exc_info=True); return False
     finally:
         if c: c.close()
 

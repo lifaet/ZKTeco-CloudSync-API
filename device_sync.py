@@ -1,26 +1,4 @@
-"""
-device_sync.py — Standard single-device sync, optional 2nd device via config
-
-  Standard use (1 device):
-    cp config.example.py config.py   # edit DEVICE_IP etc.
-    python device_sync.py
-
-  With 2 devices (when needed):
-    edit config.py: ENABLE_SECOND_DEVICE = True + set DEVICE_IP2/PORT2/TABLE_NAME2
-    python device_sync.py             # same file, spawns 2 threads
-
-Replaces BOTH device_sync.py and device_sync2.py — no duplicated code.
-Deletes api_server.py dependency (not used).
-
-Improvements over original:
-  - One file, DRY, single logger factory
-  - Batch INSERT with executemany (not one-by-one)
-  - Per-device last_ts tracking (no global shared state)
-  - Threaded when 2 devices enabled, gracefull shutdown on SIGINT/SIGTERM
-  - Caches working force_udp/ommit_ping after first probe
-  - LOG_LEVEL via config, no duplicate handlers
-  - UTC-naive DB timestamps use NOW() in SQL (no clock skew)
-"""
+"""Sync attendance records from one or two ZKTeco devices."""
 import time
 import sys
 import os
@@ -32,17 +10,16 @@ import pymysql
 import logging
 from logging.handlers import RotatingFileHandler
 
-# ---- Config ----
 try:
     import config as cfg
 except ImportError:
-    print("ERROR: config.py not found. Copy config.example.py -> config.py and edit it.", file=sys.stderr)
+    print("ERROR: config.py not found. Copy config.example.py to config.py and edit it.", file=sys.stderr)
     sys.exit(1)
 
 STOP_EVENT = threading.Event()
 
 def setup_logging(device_name: str, log_level: str = None):
-    """One logger per device — no duplicate handlers on reload."""
+    """Create a logger with file and console output."""
     level_name = (log_level or getattr(cfg, 'LOG_LEVEL', 'INFO')).upper()
     level = getattr(logging, level_name, logging.INFO)
     logger = logging.getLogger(f'device_sync.{device_name}')
@@ -71,19 +48,19 @@ def connect_db(logger, max_retries=5, retry_delay=5):
                 charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor,
                 autocommit=True, connect_timeout=10
             )
-            logger.info("DB connected")
+            logger.info("Database connected")
             return conn
         except Exception as e:
-            logger.warning(f"DB connect attempt {attempt}/{max_retries} failed: {e}")
+            logger.warning(f"Database connection {attempt}/{max_retries} failed: {e}")
             if attempt < max_retries:
                 time.sleep(retry_delay)
-    logger.error("DB connect failed after retries")
+    logger.error("Database connection failed after retries")
     return None
 
 def ensure_db(logger):
     conn = connect_db(logger)
     while conn is None and not STOP_EVENT.is_set():
-        logger.error("DB unavailable, retrying in 10s...")
+        logger.error("Database unavailable; retrying in 10s")
         STOP_EVENT.wait(10)
         if STOP_EVENT.is_set(): return None
         conn = connect_db(logger)
@@ -94,7 +71,7 @@ def check_db_alive(conn):
     except: return False
 
 def test_device_params(logger, ip, port):
-    logger.info(f"Probing device {ip}:{port}")
+    logger.info(f"Probing {ip}:{port}")
     for force_udp in (False, True):
         for ommit_ping in (False, True):
             if STOP_EVENT.is_set(): return None
@@ -105,12 +82,12 @@ def test_device_params(logger, ip, port):
                     try:
                         att = conn.get_attendance()
                         cnt = len(att) if att else 0
-                        logger.info(f"Probe ok force_udp={force_udp} ommit_ping={ommit_ping} records={cnt}")
+                        logger.info(f"Probe succeeded: force_udp={force_udp}, ommit_ping={ommit_ping}, records={cnt}")
                     finally:
                         conn.disconnect()
                     return {'force_udp': force_udp, 'ommit_ping': ommit_ping}
             except Exception as e:
-                logger.debug(f"Probe force_udp={force_udp} ommit_ping={ommit_ping} failed: {e}")
+                logger.debug(f"Probe failed: force_udp={force_udp}, ommit_ping={ommit_ping}: {e}")
     return None
 
 def connect_device(logger, ip, port, params, timeout=20):
@@ -118,10 +95,10 @@ def connect_device(logger, ip, port, params, timeout=20):
         zk = ZK(ip, port=port, timeout=timeout, force_udp=params.get('force_udp', False), ommit_ping=params.get('ommit_ping', False))
         conn = zk.connect()
         if conn:
-            logger.info(f"Device {ip}:{port} connected")
+            logger.info(f"Connected to {ip}:{port}")
             return conn
     except Exception as e:
-        logger.warning(f"Device connect {ip}:{port} failed: {e}")
+        logger.warning(f"Connection to {ip}:{port} failed: {e}")
     return None
 
 def get_last_timestamp(conn, table):
@@ -135,7 +112,7 @@ def get_last_timestamp(conn, table):
         return None
 
 def bulk_insert(logger, conn, table, records):
-    """Batch insert — one round-trip per chunk."""
+    """Insert records in batches."""
     if not records: return 0
     CHUNK = 200
     inserted = 0
@@ -150,11 +127,19 @@ def bulk_insert(logger, conn, table, records):
                 )
                 if cur.rowcount > 0:
                     inserted += cur.rowcount
-                    logger.info(f"Inserted {cur.rowcount} rows into {table} (chunk {i//CHUNK+1})")
+                    for record in chunk:
+                        logger.info(
+                            "Inserted attendance: user_id=%s, timestamp=%s, status=%s, punch=%s",
+                            record.user_id,
+                            record.timestamp,
+                            getattr(record, 'status', ''),
+                            getattr(record, 'punch', ''),
+                        )
                 else:
-                    logger.debug(f"No new rows in chunk {i//CHUNK+1} ({table})")
+                    logger.debug(f"No new rows inserted into {table}")
         except Exception as e:
-            logger.error(f"Bulk insert {table} chunk failed: {e}")
+            logger.error(f"Insert into {table} failed: {e}")
+            return None
     return inserted
 
 def poll_device(device: dict):
@@ -165,20 +150,24 @@ def poll_device(device: dict):
     name = device['name']
     ip = device['ip']; port = device['port']; table = device['table']
     logger = setup_logging(name)
-    logger.info(f"Starting poll for {name} -> {ip}:{port} -> table `{table}`")
+    logger.info(f"Polling {ip}:{port} into `{table}`")
 
-    params = test_device_params(logger, ip, port)
-    if not params:
-        logger.error(f"[{name}] No working connection params for {ip}:{port} — skipping device")
+    params = None
+    while params is None and not STOP_EVENT.is_set():
+        params = test_device_params(logger, ip, port)
+        if params is None:
+            logger.error(f"No working connection parameters for {ip}:{port}; retrying in 30s")
+            STOP_EVENT.wait(30)
+    if params is None:
         return
-    logger.info(f"[{name}] using params {params}")
+    logger.info(f"Using connection parameters {params}")
 
     conn_db = ensure_db(logger)
     if conn_db is None:
-        logger.error(f"[{name}] No DB, exiting thread")
+        logger.error("Database unavailable; stopping")
         return
     last_ts = get_last_timestamp(conn_db, table)
-    logger.info(f"[{name}] last_ts in DB: {last_ts}")
+    logger.info(f"Last database timestamp: {last_ts}")
 
     poll_interval = getattr(cfg, 'POLL_INTERVAL', 5)
     backoff = 5
@@ -189,92 +178,95 @@ def poll_device(device: dict):
             if STOP_EVENT.is_set(): break
             conn_dev = connect_device(logger, ip, port, params)
             if conn_dev: break
-            logger.warning(f"[{name}] device connect failed, retry in {backoff}s")
+            logger.warning(f"Device connection failed; retrying in {backoff}s")
             STOP_EVENT.wait(backoff)
             backoff = min(backoff*2, 60)
         if not conn_dev:
-            logger.error(f"[{name}] device unreachable, backing off 30s")
+            logger.error("Device unreachable; retrying in 30s")
             STOP_EVENT.wait(30)
             continue
         backoff = 5
 
         try:
-            logger.info(f"[{name}] polling loop started")
+            logger.info("Polling started")
             while not STOP_EVENT.is_set():
                 if not check_db_alive(conn_db):
-                    logger.warning(f"[{name}] DB lost, reconnecting...")
+                    logger.warning("Database connection lost; reconnecting")
                     conn_db = ensure_db(logger)
                     if conn_db is None: break
 
                 try:
                     attendance = conn_dev.get_attendance()
                 except Exception as e:
-                    logger.error(f"[{name}] get_attendance error: {e} — reconnecting device")
+                    logger.error(f"Attendance fetch failed: {e}; reconnecting")
                     break
 
                 if not attendance:
                     STOP_EVENT.wait(poll_interval)
                     continue
 
-                # Filter to only new records
                 new_records = []
                 for rec in attendance:
                     if not isinstance(rec.timestamp, datetime):
-                        logger.warning(f"[{name}] bad timestamp for user {getattr(rec,'user_id', '?')}")
+                        logger.warning(f"Invalid timestamp for user {getattr(rec,'user_id', '?')}")
                         continue
                     if last_ts and rec.timestamp <= last_ts:
                         continue
                     new_records.append(rec)
 
                 if not new_records:
-                    logger.debug(f"[{name}] {len(attendance)} fetched, 0 new (last_ts={last_ts})")
+                    logger.debug(f"Fetched {len(attendance)} records; no new records")
                     STOP_EVENT.wait(poll_interval)
                     continue
 
-                # Sort to ensure last_ts advances monotonically
                 new_records.sort(key=lambda r: r.timestamp)
-                logger.info(f"[{name}] {len(attendance)} fetched, {len(new_records)} new — inserting...")
-                bulk_insert(logger, conn_db, table, new_records)
+                inserted = bulk_insert(logger, conn_db, table, new_records)
+                if inserted is None:
+                    logger.warning("Database write failed; reconnecting")
+                    try:
+                        conn_db.close()
+                    except Exception:
+                        pass
+                    conn_db = ensure_db(logger)
+                    if conn_db is None:
+                        break
+                    continue
                 last_ts = new_records[-1].timestamp
 
                 STOP_EVENT.wait(poll_interval)
 
         except Exception as e:
-            logger.error(f"[{name}] polling loop crashed: {e}", exc_info=True)
+            logger.error(f"Polling failed: {e}", exc_info=True)
             STOP_EVENT.wait(5)
         finally:
             try: conn_dev.disconnect()
             except: pass
-            logger.info(f"[{name}] device disconnected, will reconnect")
+            logger.info("Device disconnected; reconnecting")
 
     try: conn_db.close()
     except: pass
-    logger.info(f"[{name}] stopped")
+    logger.info("Stopped")
 
 def main():
-    # Handle Ctrl+C / systemd SIGTERM
     def _handle_stop(signum, frame):
-        print(f"\nReceived signal {signum}, stopping...")
+        print(f"\nSignal {signum} received; stopping")
         STOP_EVENT.set()
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
 
-    # Build device list from config
     devices = []
-    # primary — required
     if not hasattr(cfg, 'DEVICE_IP') or not hasattr(cfg, 'TABLE_NAME'):
         print("ERROR: config.py must define DEVICE_IP and TABLE_NAME", file=sys.stderr); sys.exit(1)
     devices.append({"name":"primary","ip":cfg.DEVICE_IP,"port":getattr(cfg,'DEVICE_PORT', getattr(cfg,'PORT',4370)),"table":cfg.TABLE_NAME})
 
-    # optional second
     if getattr(cfg, 'ENABLE_SECOND_DEVICE', False):
         if not hasattr(cfg, 'DEVICE_IP2') or not hasattr(cfg, 'TABLE_NAME2'):
             print("ERROR: ENABLE_SECOND_DEVICE=True but DEVICE_IP2/TABLE_NAME2 missing", file=sys.stderr); sys.exit(1)
         devices.append({"name":"secondary","ip":cfg.DEVICE_IP2,"port":getattr(cfg,'DEVICE_PORT2', getattr(cfg,'PORT2',4370)),"table":cfg.TABLE_NAME2})
 
-    print(f"ZKTeco sync — {len(devices)} device(s): {[d['name']+':'+d['ip'] for d in devices]}")
+    print(f"ZKTeco sync: {len(devices)} device(s) {[d['name']+':'+d['ip'] for d in devices]}")
     print(f"Poll interval {getattr(cfg,'POLL_INTERVAL',5)}s | DB {cfg.DB_HOST}/{cfg.DB_NAME}")
-    print("Press Ctrl+C to stop\n")
+    print("Press Ctrl+C to stop.\n")
 
     if len(devices) == 1:
         poll_device(devices[0])
@@ -286,7 +278,6 @@ def main():
         try:
             while not STOP_EVENT.is_set():
                 time.sleep(1)
-                # if any thread died unexpectedly, log
                 for t in threads:
                     if not t.is_alive() and not STOP_EVENT.is_set():
                         logging.getLogger('device_sync').error(f"Thread {t.name} died unexpectedly")
