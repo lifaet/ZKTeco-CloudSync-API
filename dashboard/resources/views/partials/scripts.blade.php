@@ -74,12 +74,15 @@ function navigateMonth(offset) {
 
 function updateFilters(type){
     currentType = type;
+    // sync type select
+    $('#filter-type').val(type);
 
     // show/hide inputs
     $('#filter-date').toggleClass('d-none', type !== 'daily');
     $('#filter-month').toggleClass('d-none', type !== 'monthly');
     $('#filter-user').toggleClass('d-none', type !== 'user');
     $('#filter-user-select').toggleClass('d-none', type !== 'user');
+    $('#filter-dept').toggleClass('d-none', type !== 'daily');
 
     // show prev/next controls only for relevant types
     $('.prev-day, .next-day').toggle(type === 'daily');
@@ -95,12 +98,147 @@ function updateFilters(type){
     $('#apply-filter').toggleClass('d-none', type === 'directory');
 
     if (type === 'user') loadUsersIntoSelect();
+    if (type === 'daily') loadDeptFilter();
+}
+// --- UI Improvements helpers ---
+
+function updateLastWorkingDayChip(lastWorkDay){
+    const chip = $('#lastWorkingDayChip');
+    if (!lastWorkDay) { chip.addClass('d-none'); return; }
+    try {
+        const d = new Date(lastWorkDay + 'T00:00:00');
+        const txt = d.toLocaleDateString(undefined, { month:'short', day:'numeric', year:'numeric' });
+        chip.html('<i class="bi bi-calendar-week"></i> Last work: ' + txt).removeClass('d-none');
+    } catch(e){
+        chip.html('<i class="bi bi-calendar-week"></i> Last work: ' + lastWorkDay).removeClass('d-none');
+    }
 }
 
+function loadDeptFilter(){
+    const sel = $('#filter-dept');
+    if (!sel.length) return;
+    const depts = [...new Set((window.userDirectory || []).map(u => (u.department || u.dept || '').trim()).filter(Boolean))].sort();
+    const cur = sel.val();
+    sel.find('option:not(:first)').remove();
+    depts.forEach(d => sel.append(`<option value="${$('<div>').text(d).html()}">${$('<div>').text(d).html()}</option>`));
+    if (cur) sel.val(cur);
+}
+
+// Dept filter — DataTables custom search (client-side, no backend change)
+$.fn.dataTable.ext.search.push(function(settings, data, dataIndex){
+    if (settings.nTable && settings.nTable.id !== 'attendanceTable') return true;
+    const deptFilter = ($('#filter-dept').val() || '').trim().toLowerCase();
+    if (!deptFilter || currentType !== 'daily') return true;
+    try {
+        const row = settings.oInstance.api().row(dataIndex).data();
+        if (!row) return true;
+        const dept = ((row.department || row.dept || '') + '').toLowerCase();
+        // fallback to userDirectory
+        if (!dept && row.user_id) {
+            const s = (window.userDirectory || []).find(x => String(x.id) === String(row.user_id));
+            const d2 = (s && (s.department || s.dept) || '').toLowerCase();
+            return d2 === deptFilter;
+        }
+        return dept === deptFilter;
+    } catch(e){ return true; }
+});
+
+function initColvis(){
+    const menu = $('#colvisMenu');
+    if (!menu.length || !table) return;
+    const cols = [
+        { idx: 2, label: 'Last Day Punch' },
+        { idx: 6, label: 'Type' },
+        { idx: 7, label: 'VerifyID' }
+    ];
+    menu.empty();
+    cols.forEach(c => {
+        const visible = (()=>{ try{ return table.column(c.idx).visible(); }catch(e){return true;} })();
+        menu.append(`<label><input type="checkbox" data-col="${c.idx}" ${visible?'checked':''}> ${c.label}</label>`);
+    });
+}
+
+function showSkeleton(){
+    const tbody = $('#attendanceTable tbody');
+    if (!tbody.length) return;
+    tbody.empty();
+    for(let i=0;i<5;i++){
+        tbody.append(`<tr class="skeleton-row"><td><span class="skeleton" style="width:60%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:70%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:40%"></span></td><td><span class="skeleton" style="width:50%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:30%"></span></td><td><span class="skeleton" style="width:20%"></span></td></tr>`);
+    }
+}
+
+function validatePunchTimes(){
+    const fp = ($('#edit-first-punch').val() || '').trim();
+    const lp = ($('#edit-last-punch').val() || '').trim();
+    const err = $('#edit-punch-error');
+    if (fp && lp && fp > lp) { err.removeClass('d-none'); return false; }
+    err.addClass('d-none'); return true;
+}
+function validateAddPunchTimes(){
+    const fp = ($('#add-first-punch').val() || '').trim();
+    const lp = ($('#add-last-punch').val() || '').trim();
+    const err = $('#add-punch-error');
+    if (fp && lp && fp > lp) { err.removeClass('d-none'); return false; }
+    err.addClass('d-none'); return true;
+}
+
+// Sidebar persist + door badge
+function initSidebarPersist(){
+    const key = 'zkteco_sidebar_collapsed';
+    try {
+        const collapsed = localStorage.getItem(key) === '1';
+        if (collapsed && $(window).width() > 768) {
+            $('#sidebar').addClass('collapsed');
+            $('.content').css('margin-left', '60px');
+            $('footer .copyright').css('margin-left', '60px');
+        }
+    } catch(e){}
+    // double-click sidebar to collapse (desktop)
+    $('#sidebar').on('dblclick', function(e){
+        if ($(window).width() <= 768) return;
+        $(this).toggleClass('collapsed');
+        const isCollapsed = $(this).hasClass('collapsed');
+        try{ localStorage.setItem(key, isCollapsed?'1':'0'); }catch(e){}
+        if (isCollapsed) {
+            $('.content').css('margin-left', '60px');
+            $('footer .copyright').css('margin-left', '60px');
+            $(this).find('a').each(function(){ const txt=$(this).text().trim(); $(this).attr('title', txt); });
+        } else {
+            $('.content').css('margin-left', '180px');
+            $('footer .copyright').css('margin-left', '180px');
+        }
+    });
+}
+
+function initDoorBadge(){
+    const badge = $('#doorLiveBadge');
+    if (!badge.length) return;
+    function refresh(){
+        // attendance2 may not be enabled — fail silently
+        $.getJSON('/api/attendance2/summary', { date: new Date().toISOString().slice(0,10) }).done(function(res){
+            const count = (res && (res.total || (res.data && res.data.length) || res.count)) || 0;
+            if (count > 0) badge.text(count + ' today').show();
+            else badge.text('0 today').show();
+        }).fail(function(){
+            // try alternative endpoint
+            $.getJSON('/api/check-latest', { type: 'door' }).done(function(res){
+                const c = res && res.count ? res.count : null;
+                if (c !== null) badge.text(c + ' today').show();
+            }).fail(function(){});
+        });
+    }
+    refresh();
+    setInterval(refresh, 30000);
+}
+
+
+
 function showToast(title, message){
+    const isError = /error|fail|invalid/i.test(title);
     const toastId = 'toast-' + Date.now();
+    const bg = isError ? 'text-bg-danger' : 'text-bg-success';
     const toastHTML = `
-      <div id="${toastId}" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+      <div id="${toastId}" class="toast align-items-center ${bg} border-0" role="alert" aria-live="assertive" aria-atomic="true">
         <div class="d-flex">
           <div class="toast-body">
             <strong>${title}</strong><br>${message}
@@ -108,13 +246,15 @@ function showToast(title, message){
           <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
         </div>
       </div>`;
-        // ensure a toast container exists (some other partials create it, but not always)
         if ($('.toast-container').length === 0) {
-                $('body').append('<div class="toast-container position-fixed bottom-0 end-0 p-3"></div>');
+                $('body').append('<div class="toast-container position-fixed p-3" style="z-index: 2100; top:70px; right:0;"></div>');
         }
         $('.toast-container').append(toastHTML);
-    const toastEl = new bootstrap.Toast(document.getElementById(toastId), { delay: 2000 });
+    const delay = isError ? 5000 : 3000;
+    const toastEl = new bootstrap.Toast(document.getElementById(toastId), { delay: delay, autohide: true });
     toastEl.show();
+    // auto remove from DOM after hide
+    document.getElementById(toastId).addEventListener('hidden.bs.toast', function(){ $(this).remove(); });
 }
 
 function checkNewPunch(){
@@ -193,6 +333,10 @@ $(document).ready(function(){
     table = $('#attendanceTable').DataTable({
         serverSide: true,
         processing: true,
+        language: {
+            emptyTable: `<div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><div class="empty-title">No punches for this filter</div><div class="empty-sub">Try another date — <span class="js-empty-date"></span> — or check User Directory</div></div>`,
+            processing: '<div class="d-flex align-items-center gap-2"><div class="spinner-border spinner-border-sm text-primary" role="status"></div> Loading…</div>'
+        },
         ajax: {
             url: '/api/attendance-summary',
             data: function(d){
@@ -200,6 +344,17 @@ $(document).ready(function(){
                 d.date = $('#filter-date').val();
                 d.month = $('#filter-month').val();
                 d.user = $('#filter-user').val();
+            },
+            error: function(xhr, textStatus, error){
+                console.error('DataTables ajax error', xhr && xhr.status, textStatus, error);
+                if (xhr && xhr.status === 401) return; // handled by ajaxError
+                const msg = (xhr && xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : 'Failed to load attendance data' + (xhr && xhr.status ? ' ('+xhr.status+')' : '');
+                // avoid spamming on every poll
+                if (!window._dtErrorShown) {
+                    showToast('Error', msg);
+                    window._dtErrorShown = true;
+                    setTimeout(()=> window._dtErrorShown=false, 8000);
+                }
             }
         },
         columns: [
@@ -271,9 +426,105 @@ $(document).ready(function(){
         ],
         order: [[1, 'desc']],
         lengthMenu: [[25, 50, 100, 1000000], [25, 50, 100, "All"]],
-        pageLength: 25
+        pageLength: 25,
+        createdRow: function(row, data){
+            if (data.is_absent) $(row).addClass('row-absent');
+            else if (data.work_time) {
+                const parts = String(data.work_time).split(':');
+                const h = parseInt(parts[0]||0,10), m = parseInt(parts[1]||0,10);
+                const mins = h*60 + m;
+                if (mins > 0 && mins < 480) $(row).addClass('row-short');
+            }
+        },
+        drawCallback: function(settings){
+            try {
+                const api = this.api();
+                const json = api.ajax.json();
+                if (json && json.last_working_day) updateLastWorkingDayChip(json.last_working_day);
+                // update empty date hint
+                const d = $('#filter-date').val() || '';
+                $('.js-empty-date').text(d);
+            } catch(e){}
+        },
+        preDrawCallback: function(settings){
+            // show skeleton on first draw while processing
+            const api = this.api();
+            // DataTables shows processing indicator, skeleton is optional
+        },
+        initComplete: function(settings, json){
+            if (json && json.last_working_day) updateLastWorkingDayChip(json.last_working_day);
+            initColvis();
+            loadDeptFilter();
+            // hook dept filter
+            $('#filter-dept').on('change', function(){ table.draw(); });
+        }
     });
 
+
+    // --- UI Improvements: filter type select, presets, colvis, sidebar, door badge ---
+    // Filter type select syncs with hash/sidebar
+    $('#filter-type').on('change', function(){
+        const v = $(this).val();
+        if (v) window.location.hash = v;
+    });
+    // Dept filter
+    $('#filter-dept').on('change', function(){ if (table) table.draw(); });
+
+    // Preset buttons
+    $('.preset-btn').on('click', function(){
+        const preset = $(this).data('preset');
+        const today = new Date();
+        if (preset === 'today') {
+            const d = today.toISOString().slice(0,10);
+            $('#filter-date').val(d);
+            $('#filter-type').val('daily');
+            window.location.hash = 'daily';
+            updateFilters('daily');
+            table.ajax.reload();
+        } else if (preset === 'yesterday') {
+            const d = new Date(today); d.setDate(d.getDate()-1);
+            const ds = d.toISOString().slice(0,10);
+            $('#filter-date').val(ds);
+            $('#filter-type').val('daily');
+            window.location.hash = 'daily';
+            updateFilters('daily');
+            table.ajax.reload();
+        } else if (preset === 'thisMonth') {
+            const m = today.toISOString().slice(0,7);
+            $('#filter-month').val(m);
+            $('#filter-type').val('monthly');
+            window.location.hash = 'monthly';
+            updateFilters('monthly');
+            table.ajax.reload();
+        }
+    });
+
+    // Column visibility — fixed position to avoid clipping in scrollable filters
+    $('#colvisBtn').on('click', function(e){
+        e.stopPropagation();
+        const btn = $(this);
+        const menu = $('#colvisMenu');
+        if (menu.hasClass('show')) { menu.removeClass('show'); return; }
+        const rect = btn[0].getBoundingClientRect();
+        menu.css({ top: (rect.bottom + 6) + 'px', right: (window.innerWidth - rect.right) + 'px', left: 'auto' }).addClass('show');
+    });
+    $(document).on('click', function(e){
+        if (!$(e.target).closest('.colvis-dropdown').length) $('#colvisMenu').removeClass('show');
+    });
+    $(window).on('resize scroll', function(){ $('#colvisMenu').removeClass('show'); });
+    $('#colvisMenu').on('change', 'input[type="checkbox"]', function(){
+        const col = parseInt($(this).data('col'),10);
+        const vis = $(this).is(':checked');
+        try { table.column(col).visible(vis); } catch(e){}
+    });
+
+    // Punch validation live
+    $('#edit-first-punch, #edit-last-punch').on('change input', validatePunchTimes);
+    $('#add-first-punch, #add-last-punch').on('change input', validateAddPunchTimes);
+
+    // Init sidebar persist and door badge
+    initSidebarPersist();
+    initDoorBadge();
 
     // initialize filter UI for current view via URL hash (deep-linking)
     // Supported hashes: #daily (default), #monthly, #user, #directory
@@ -372,6 +623,7 @@ $(document).ready(function(){
 
     // Handle Save Edit
     $('#saveEdit').click(function() {
+        if (!validatePunchTimes()) { showToast('Error', 'First punch cannot be later than last punch'); return; }
         // Determine punch to send: if the original punch was 255 (machine auto),
         // mark it as manual when a human edits.
         const originalPunch = String($('#edit-original-punch').val() || '');
@@ -423,6 +675,8 @@ $(document).ready(function(){
         const row = table.row($(this).closest('tr')).data();
         $('#delete-user-id').val(row.user_id);
         $('#delete-date').val(row.date);
+        const details = `User ${row.user_id} — ${row.date} — ${row.first_punch || '—'} → ${row.last_punch || '—'}`;
+        $('#delete-details').text(details).removeClass('d-none');
         $('#deleteModal').modal('show');
     });
 
@@ -819,6 +1073,7 @@ $(document).ready(function(){
                     window.userDirectory = [];
                 }
                 renderUserTable();
+                loadDeptFilter();
             }).fail(function(){
                 window.userDirectory = [];
                 renderUserTable();
@@ -1059,6 +1314,7 @@ $(document).ready(function(){
             showToast('Error', 'Please select user and provide date and first punch');
             return;
         }
+        if (!validateAddPunchTimes()) { showToast('Error', 'First punch cannot be later than last punch'); return; }
 
         $.ajax({
             url: '/api/attendance/add',

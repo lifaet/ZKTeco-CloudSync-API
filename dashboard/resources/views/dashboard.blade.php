@@ -31,7 +31,7 @@
     <a href="#" data-type="user"><i class="bi bi-person-circle"></i> User-wise</a>
     <a href="#" data-type="directory"><i class="bi bi-people"></i> User Directory</a>
     @if(env('ATTENDANCE2_ENABLED'))
-    <a href="/attendance2"><i class="bi bi-clock"></i> Attendance2</a>
+    <a href="/attendance2" id="attendance2Link"><i class="bi bi-clock"></i> Attendance2 <span id="doorLiveBadge" class="badge bg-info ms-auto" style="display:none;">0</span></a>
     @endif
     <hr>
     <a href="#" id="logoutBtn" class="logout-btn"><i class="bi bi-box-arrow-right"></i> Logout</a>
@@ -40,30 +40,56 @@
 <!-- Main Content -->
 <div class="content">
     <div class="content-wrapper">
-    <div class="d-flex align-items-center gap-2" style="margin-bottom: 1rem;">
-        <div class="input-group flex-nowrap" style="width:auto;">
-            <button class="btn btn-outline-secondary prev-day" title="Previous day" style="display:none;"><i class="bi bi-chevron-left"></i></button>
-            <input type="date" id="filter-date" class="form-control" value="{{ date('Y-m-d') }}" style="width:140px;">
-            <button class="btn btn-outline-secondary next-day" title="Next day" style="display:none;"><i class="bi bi-chevron-right"></i></button>
+    <div class="filters d-flex align-items-center gap-2 flex-nowrap" style="margin-bottom: 1rem; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch;">
+        <!-- Type selector — single pill -->
+        <select id="filter-type" class="form-select form-select-sm" style="width:105px; min-width:105px;">
+            <option value="daily">Daily</option>
+            <option value="monthly">Monthly</option>
+            <option value="user">User</option>
+            <option value="directory">Directory</option>
+        </select>
+
+        <div class="input-group flex-nowrap" style="width:auto; flex-shrink:0;">
+            <button class="btn btn-outline-secondary btn-sm prev-day" title="Previous day" style="display:none;"><i class="bi bi-chevron-left"></i></button>
+            <input type="date" id="filter-date" class="form-control form-control-sm" value="{{ date('Y-m-d') }}" style="width:135px; min-width:135px;">
+            <button class="btn btn-outline-secondary btn-sm next-day" title="Next day" style="display:none;"><i class="bi bi-chevron-right"></i></button>
         </div>
 
-        <div class="input-group flex-nowrap" style="width:auto;">
-            <button class="btn btn-outline-secondary prev-month" title="Previous month" style="display:none;"><i class="bi bi-chevron-left"></i></button>
-            <input type="month" id="filter-month" class="form-control d-none" value="{{ date('Y-m') }}" style="width:140px;">
-            <button class="btn btn-outline-secondary next-month" title="Next month" style="display:none;"><i class="bi bi-chevron-right"></i></button>
+        <div class="input-group flex-nowrap" style="width:auto; flex-shrink:0;">
+            <button class="btn btn-outline-secondary btn-sm prev-month" title="Previous month" style="display:none;"><i class="bi bi-chevron-left"></i></button>
+            <input type="month" id="filter-month" class="form-control form-control-sm d-none" value="{{ date('Y-m') }}" style="width:135px; min-width:135px;">
+            <button class="btn btn-outline-secondary btn-sm next-month" title="Next month" style="display:none;"><i class="bi bi-chevron-right"></i></button>
         </div>
 
-        <div class="input-group flex-nowrap" style="width:auto;">
-            <input type="text" id="filter-user" class="form-control d-none" placeholder="User ID" style="width:180px;">
-            <select id="filter-user-select" class="form-select d-none" style="width:180px;"></select>
+        <div class="input-group flex-nowrap" style="width:auto; flex-shrink:0;">
+            <input type="text" id="filter-user" class="form-control form-control-sm d-none" placeholder="User ID" style="width:135px; min-width:135px;">
+            <select id="filter-user-select" class="form-select form-select-sm d-none" style="width:135px; min-width:135px;"></select>
         </div>
 
-        <button id="apply-filter" class="btn btn-primary">Apply</button>
-        <button id="addAttendanceBtn" class="btn btn-warning">Add Attendance</button>
-        <button id="copy-daily" class="btn btn-outline-secondary d-none">Copy</button>
-        <button id="export-daily" class="btn btn-outline-success d-none">Export to CSV</button>
-        <button id="formatted-copy" class="btn btn-outline-primary d-none"><i class="bi bi-clipboard-check"></i> Formatted Copy</button>
-        <button id="settingsBtn" class="btn btn-outline-secondary" title="Weekend &amp; Holiday Settings"><i class="bi bi-gear"></i></button>
+        <select id="filter-dept" class="form-select form-select-sm d-none" style="width:125px; min-width:125px; flex-shrink:0;">
+            <option value="">All Departments</option>
+        </select>
+
+        <button id="apply-filter" class="btn btn-primary btn-sm" style="flex-shrink:0;">Apply</button>
+        <button id="addAttendanceBtn" class="btn btn-warning btn-sm" style="flex-shrink:0;">Add</button>
+
+        <div class="vr mx-1 d-none d-md-block" style="flex-shrink:0;"></div>
+
+        <button class="btn btn-outline-secondary btn-sm preset-btn" data-preset="today" title="Today" style="flex-shrink:0;">Today</button>
+        <button class="btn btn-outline-secondary btn-sm preset-btn" data-preset="yesterday" title="Yesterday" style="flex-shrink:0;">Yesterday</button>
+        <button class="btn btn-outline-secondary btn-sm preset-btn" data-preset="thisMonth" title="This Month" style="flex-shrink:0;">This Month</button>
+
+        <div class="d-flex align-items-center gap-2" style="flex-shrink:0; margin-left:auto;">
+            <span id="lastWorkingDayChip" class="badge bg-light text-dark border d-none" style="white-space:nowrap;"><i class="bi bi-calendar-week"></i> Last work: —</span>
+            <button id="copy-daily" class="btn btn-outline-secondary btn-sm d-none" style="flex-shrink:0;">Copy</button>
+            <button id="export-daily" class="btn btn-outline-success btn-sm d-none" style="flex-shrink:0;">Export</button>
+            <button id="formatted-copy" class="btn btn-outline-primary btn-sm d-none" style="flex-shrink:0;"><i class="bi bi-clipboard-check"></i> Formatted</button>
+            <div class="colvis-dropdown" style="flex-shrink:0;">
+                <button id="colvisBtn" class="btn btn-outline-secondary btn-sm" title="Columns"><i class="bi bi-layout-three-columns"></i></button>
+                <div id="colvisMenu" class="colvis-menu"></div>
+            </div>
+            <button id="settingsBtn" class="btn btn-outline-secondary btn-sm" title="Weekend &amp; Holiday Settings" style="flex-shrink:0;"><i class="bi bi-gear"></i></button>
+        </div>
     </div>
 
     <div id="attendanceSection">
@@ -251,6 +277,7 @@
                     <div class="mb-3">
                         <label class="form-label">Last Punch</label>
                         <input type="time" class="form-control" id="edit-last-punch" step="1">
+                        <small id="edit-punch-error" class="text-danger d-none">First punch cannot be later than last punch</small>
                     </div>
                     <input type="hidden" id="edit-original-punch">
                     <div class="mb-3">
@@ -276,7 +303,8 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                Are you sure you want to delete this attendance record?
+                <p>Are you sure you want to delete this attendance record?</p>
+                <div id="delete-details" class="alert alert-light border small text-muted mb-2 d-none"></div>
                 <input type="hidden" id="delete-user-id">
                 <input type="hidden" id="delete-date">
             </div>
@@ -317,6 +345,7 @@
                                 <div class="mb-3">
                                     <label class="form-label">Last Punch (optional)</label>
                                     <input type="time" step="1" id="add-last-punch" class="form-control">
+                                <small id="add-punch-error" class="text-danger d-none">First punch cannot be later than last punch</small>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">VerifyID (optional)</label>

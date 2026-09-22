@@ -225,7 +225,7 @@ body {
 /* Toast Notifications */
 .toast-container {
     position: fixed;
-    top: 80px;
+    top: 70px;
     right: 1rem;
     z-index: 2000;
 }
@@ -320,6 +320,216 @@ footer .maintenance a:hover {
 ::-webkit-scrollbar-thumb { background: rgba(2, 132, 199, 0.4); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(2, 132, 199, 0.6); }
 
+/* Ensure DataTables wrapper allows sticky */
+div.dataTables_wrapper { overflow: visible !important; }
+
 /* Ensure DataTables stretch to container width and recalc reliably */
 .dataTable, #attendanceTable, #userTable { width: 100% !important; }
+/* === UI Improvements — Keep Glass, Better UX === */
+
+/* Sticky header for long tables — fixed to content top (navbar is outside) */
+#attendanceTable thead th {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: #ffffff !important;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 2px 4px rgba(100,116,139,0.15);
+    border-bottom: 2px solid rgba(100,116,139,0.15) !important;
+}
+#userTable thead th {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background: #ffffff !important;
+    backdrop-filter: blur(8px);
+    border-bottom: 2px solid rgba(100,116,139,0.12);
+}
+
+/* Row states — subtle, glass-friendly */
+#attendanceTable tbody tr.row-absent {
+    background: rgba(254, 242, 242, 0.85) !important; /* very light red */
+}
+#attendanceTable tbody tr.row-absent:hover {
+    background: rgba(254, 226, 226, 0.9) !important;
+}
+#attendanceTable tbody tr.row-short {
+    background: rgba(254, 249, 195, 0.75) !important; /* light yellow for <8h */
+}
+#attendanceTable tbody tr.row-short:hover {
+    background: rgba(253, 244, 155, 0.85) !important;
+}
+
+/* Filters — pill style, single row, glass */
+.filters {
+    gap: 0.5rem;
+    padding: 0.6rem 0.7rem;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: visible;
+    position: relative;
+    align-items: center;
+}
+.filters .form-control,
+.filters .form-select {
+    border-radius: 20px !important;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.78rem;
+    height: 32px;
+}
+.filters .btn {
+    border-radius: 20px !important;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.78rem;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+.filters .input-group .btn,
+.filters .input-group .form-control,
+.filters .input-group .form-select {
+    border-radius: 0 !important;
+}
+.filters .input-group .btn:first-child,
+.filters .input-group .form-control:first-child,
+.filters .input-group .form-select:first-child {
+    border-top-left-radius: 20px !important;
+    border-bottom-left-radius: 20px !important;
+}
+.filters .input-group .btn:last-child,
+.filters .input-group .form-control:last-child,
+.filters .input-group .form-select:last-child {
+    border-top-right-radius: 20px !important;
+    border-bottom-right-radius: 20px !important;
+}
+#filter-type {
+    width: 105px !important;
+    min-width: 105px;
+    font-weight: 500;
+}
+#filter-dept {
+    width: 135px !important;
+    min-width: 135px;
+}
+#lastWorkingDayChip {
+    border-radius: 20px;
+    padding: 0.35rem 0.65rem;
+    font-size: 0.72rem;
+    background: rgba(255,255,255,0.85) !important;
+    border: 1px solid rgba(100,116,139,0.15) !important;
+    backdrop-filter: blur(4px);
+}
+#doorLiveBadge {
+    font-size: 0.62rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 20px;
+    background: rgba(2,132,199,0.9) !important;
+}
+
+/* Preset buttons — subtle */
+.preset-btn {
+    background: rgba(255,255,255,0.7) !important;
+    border: 1px solid rgba(100,116,139,0.2) !important;
+    color: #334155 !important;
+}
+.preset-btn:hover {
+    background: rgba(2,132,199,0.1) !important;
+    border-color: rgba(2,132,199,0.3) !important;
+    color: #0284c7 !important;
+}
+
+/* Skeleton loaders */
+.skeleton-row td {
+    padding: 0.5rem 0.6rem !important;
+}
+.skeleton {
+    display: block;
+    height: 14px;
+    border-radius: 8px;
+    background: linear-gradient(90deg, rgba(226,232,240,0.8) 25%, rgba(241,245,249,0.9) 50%, rgba(226,232,240,0.8) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+@keyframes skeleton-pulse {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 2.5rem 1rem;
+    color: #64748b;
+}
+.empty-state .empty-icon {
+    font-size: 2.5rem;
+    opacity: 0.35;
+    margin-bottom: 0.75rem;
+}
+.empty-state .empty-title {
+    font-weight: 600;
+    color: #334155;
+    margin-bottom: 0.25rem;
+}
+.empty-state .empty-sub {
+    font-size: 0.82rem;
+    color: #94a3b8;
+}
+
+/* Colvis dropdown — glass */
+.colvis-dropdown {
+    position: relative;
+}
+.colvis-menu {
+    position: fixed;
+    z-index: 1050;
+    min-width: 160px;
+    margin-top: 0.4rem;
+    padding: 0.5rem;
+    background: rgba(255,255,255,0.98);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(100,116,139,0.15);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.14);
+    display: none;
+}
+.colvis-menu.show { display: block; }
+.colvis-menu label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.4rem;
+    font-size: 0.8rem;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+.colvis-menu label:hover { background: rgba(2,132,199,0.08); }
+.colvis-menu input[type="checkbox"] { accent-color: #0284c7; }
+
+/* Mobile — scrollable filters, reduced blur */
+@media (max-width: 768px) {
+    .filters {
+        flex-wrap: wrap !important;
+        overflow-x: visible !important;
+        overflow-y: visible !important;
+        gap: 0.4rem;
+        padding: 0.5rem;
+        justify-content: flex-start;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+        padding-bottom: 0.5rem;
+    }
+    .filters::-webkit-scrollbar { height: 4px; }
+    .filters .ms-auto {
+        flex-shrink: 0;
+    }
+    .navbar-header { backdrop-filter: blur(6px) !important; }
+    .sidebar { backdrop-filter: blur(6px) !important; }
+    .content-wrapper { backdrop-filter: blur(6px) !important; }
+    #attendanceTable thead th { top: 0; }
+}
+
 </style>
