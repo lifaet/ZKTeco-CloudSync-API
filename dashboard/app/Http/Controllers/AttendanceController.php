@@ -127,12 +127,17 @@ class AttendanceController extends Controller
                 }
             }
 
-            // Apply search filter if provided
+            // Apply search filter if provided — now checks Name/Title/Department as well (not just punches)
             if ($search = $request->input('search.value')) {
                 $data = array_filter($data, function($row) use ($search) {
-                    return stripos($row['user_id'], $search) !== false ||
-                           stripos($row['first_punch'], $search) !== false ||
-                           stripos($row['last_punch'], $search) !== false;
+                    return stripos((string)($row['user_id'] ?? ''), $search) !== false ||
+                           stripos((string)($row['name'] ?? ''), $search) !== false ||
+                           stripos((string)($row['title'] ?? ''), $search) !== false ||
+                           stripos((string)($row['department'] ?? ''), $search) !== false ||
+                           stripos((string)($row['date'] ?? ''), $search) !== false ||
+                           stripos((string)($row['first_punch'] ?? ''), $search) !== false ||
+                           stripos((string)($row['last_punch'] ?? ''), $search) !== false ||
+                           stripos((string)($row['work_time'] ?? ''), $search) !== false;
                 });
             }
 
@@ -268,7 +273,7 @@ class AttendanceController extends Controller
         ]);
         $userId = $data['user_id'];
         $date = $data['date'];
-        
+
         // Find the attendance records for this user and date
         $records = Attendance::where('user_id', $userId)
             ->whereDate('timestamp', $date)
@@ -285,7 +290,7 @@ class AttendanceController extends Controller
 
         // Parse the time inputs
         $firstTime = Carbon::parse($date . ' ' . $data['first_punch']);
-        
+
         // Update first punch
         $firstRecord->timestamp = $firstTime;
         $firstRecord->punch = $data['punch'] ?? $firstRecord->punch;
@@ -342,6 +347,20 @@ class AttendanceController extends Controller
         $firstPunch = $data['first_punch'];
         $lastPunch = $data['last_punch'] ?? null;
         $status = $data['status'] ?? null;
+
+        // Prevent 3+ rows per user per day — manual Add is for absent/single-punch days only (max 2)
+        $existingCount = Attendance::where('user_id', $userId)->whereDate('timestamp', $date)->count();
+        $newRows = ($lastPunch && $lastPunch !== $firstPunch) ? 2 : 1;
+        if ($existingCount + $newRows > 2) {
+            return response()->json(['message' => 'This user already has '.$existingCount.' punch(es) on '.$date.'. Maximum 2 per day — use Edit instead.'], 422);
+        }
+        if ($existingCount > 0) {
+            // Optional: ensure user exists and is active
+            $u = User::find($userId);
+            if ($u && !$u->active) {
+                return response()->json(['message' => 'User is inactive'], 422);
+            }
+        }
 
         try {
             $firstTs = Carbon::parse($date . ' ' . $firstPunch)->format('Y-m-d H:i:s');
