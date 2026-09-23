@@ -1144,11 +1144,11 @@ $(document).ready(function(){
 
                 html += '<tr>'
                      + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; font-weight:bold; background-color:#fff;">Prepared by</td>'
+                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; background-color:#fff;">Prepared by</td>'
                      + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
                      + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
                      + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
-                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; font-weight:bold; background-color:#fff;">Secretary General</td>'
+                     + '<td style="border-top:1px solid #000; border-left:none; border-right:none; border-bottom:none; padding:4px 8px; vertical-align:middle; text-align:middle; background-color:#fff;">Secretary General</td>'
                      + '<td style="border:none; padding:4px 8px; vertical-align:middle; text-align:left; background-color:#fff;"></td>'
                      + '</tr>';
 
