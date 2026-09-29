@@ -1,7 +1,7 @@
 # Primary device
 DEVICE_IP = '192.168.1.201'
 DEVICE_PORT = 4370
-POLL_INTERVAL = 5
+POLL_INTERVAL = 15
 
 # Optional second device
 ENABLE_SECOND_DEVICE = False

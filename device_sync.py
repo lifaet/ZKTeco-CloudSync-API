@@ -198,6 +198,9 @@ def poll_device(device: dict):
                 try:
                     attendance = conn_dev.get_attendance()
                 except Exception as e:
+                    if "timed out" in str(e).lower():
+                        logger.warning(f"Timeout — device {ip} overloaded, waiting 30s before reconnect")
+                        STOP_EVENT.wait(30)
                     logger.error(f"Attendance fetch failed: {e}; reconnecting")
                     break
 
